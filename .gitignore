@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# env
+.env
+.env.local
+.env.*.local
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# agent scratch
+.agents/scratch/

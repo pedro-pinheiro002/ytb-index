@@ -1,0 +1,33 @@
+{
+  "name": "ytb-index",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A TypeScript + Hono service that ingests one YouTube channel and serves a timestamped-comment index. See docs/spec/v1.md.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev": "tsx watch src/server/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server/index.js",
+    "ingest": "tsx src/cli/ingest.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.7",
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.5",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

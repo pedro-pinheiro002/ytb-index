@@ -1,0 +1,12 @@
+node_modules
+dist
+pnpm-lock.yaml
+.agents
+AGENTS.md
+docs/spec
+docs/research
+docs/adr
+GLOSSARY.md
+README.md
+package.json
+tsconfig.json
