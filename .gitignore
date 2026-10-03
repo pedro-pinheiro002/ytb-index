@@ -22,4 +22,10 @@ npm-debug.log*
 pnpm-debug.log*
 
 # agent scratch
-.agents/scratch/
+.agents/
+.scratch/
+
+# database
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
