@@ -1,0 +1,13 @@
+{
+  "name": "ytb-index",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-09-01",
+  "d1_databases": [
+    {
+      "binding": "ytb_index",
+      "database_name": "ytb-index",
+      "database_id": "fbd4036f-9486-4c20-a6d4-47e74d2c8bc6",
+      "migrations_dir": "migrations",
+    },
+  ],
+}

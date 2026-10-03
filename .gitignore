@@ -6,6 +6,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# wrangler / miniflare local state (local D1, caches)
+.wrangler/
+
 # env
 .env
 .env.local

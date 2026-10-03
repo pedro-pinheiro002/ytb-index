@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { upsertAnchors, upsertChannel, upsertComments, upsertVideos } from '../db/queries.ts';
-import { createApp } from './index.ts';
+import { createApp } from './app.ts';
 
 const CHANNEL: Channel = {
   id: 'UC_int_channel',
