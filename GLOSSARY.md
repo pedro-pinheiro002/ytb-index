@@ -8,6 +8,12 @@ The canonical vocabulary of the ytb-index service: a one-shot ingester that turn
 The single YouTube channel one ingest run fetches from, looked up by handle (`@handle`) or channel ID.
 _Avoid_: YouTube channel (redundant — every Channel here is on YouTube), source channel, channel entity
 
+## Pipeline
+
+**Ingest**:
+The single sequential run that pulls one Channel's uploads, videos, and top-level comments from the YouTube Data API and upserts them into the Catalog.
+_Avoid_: sync, import, scrape, crawl
+
 ## Catalog
 
 **Catalog**:
