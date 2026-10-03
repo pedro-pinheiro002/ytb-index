@@ -1,6 +1,6 @@
-// src/yt — YouTube Data API v3 client + TimeAnchor detection algorithm.
-// Owns: HTTP calls to youtube.googleapis.com, response shape → shared types,
-// and the TimeAnchor regex/parsing logic (per wayfinder #7).
-// Depends on: src/shared (types only).
-// Does NOT know about: src/db (no persistence here), src/server (no HTTP serving).
-export {};
+/**
+ * src/yt — YouTube Data API v3 client + TimeAnchor detection + API key validation.
+ * See chat: #18 (T05 client), #15 (T02 anchors), #13 (T01 api-key).
+ */
+export { validateApiKey, API_KEY_FAILURE_MESSAGES } from './api-key.ts';
+export type { ApiKeyValidation } from './api-key.ts';
