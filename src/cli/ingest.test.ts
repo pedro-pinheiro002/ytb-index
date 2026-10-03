@@ -1,8 +1,9 @@
 /**
  * End-to-end tests for `runIngest` (#19 / T06).
  *
- * Everything runs against a fake `transport` (the single seam) and an
- * in-memory SQLite database — no network, no real files.
+ * Everything runs against a fake `transport` (the YouTube seam), a fake
+ * `D1RestWriter` for `--remote`, and an in-memory SQLite database — no
+ * network, no real files.
  *
  * `runIngest` opens *and closes* its own connection, so plain `:memory:` would
  * be gone by the time we assert on rows. Each test therefore uses a throwaway
@@ -10,7 +11,7 @@
  */
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -21,11 +22,20 @@ import type {
   VideoResource,
 } from '../yt/client.ts';
 import { openCatalog } from '../db/sqlite.ts';
+import type { D1RestWriter } from '../db/d1-http.ts';
+import type { Statement } from '../db/executor.ts';
 import { API_KEY_FAILURE_MESSAGES } from '../yt/api-key.ts';
 import { runIngest } from './ingest.ts';
 
 // A valid-shape key: `AIza` + 35 URL-safe chars.
 const VALID_KEY = `AIza${'x'.repeat(35)}`;
+
+/** Env vars `--remote` requires; kept empty across tests by default. */
+const REMOTE_ENV_VARS = [
+  'CLOUDFLARE_API_TOKEN',
+  'CLOUDFLARE_ACCOUNT_ID',
+  'D1_DATABASE_ID',
+] as const;
 
 // ---------------------------------------------------------------------------
 // Captured stdout / stderr + shared in-memory DB
@@ -56,12 +66,14 @@ beforeEach(() => {
   }) as typeof process.stderr.write;
 
   process.env['YOUTUBE_API_KEY'] = VALID_KEY;
+  for (const name of REMOTE_ENV_VARS) delete process.env[name];
 });
 
 afterEach(() => {
   process.stdout.write = originalOut;
   process.stderr.write = originalErr;
   rmSync(tempDir, { recursive: true, force: true });
+  for (const name of REMOTE_ENV_VARS) delete process.env[name];
 });
 
 const stdout = (): string => outChunks.join('');
@@ -86,6 +98,19 @@ async function row(sql: string): Promise<Record<string, unknown>> {
   } finally {
     db.close();
   }
+}
+
+/** Fake `D1RestWriter` recording every `apply()` call. */
+function fakeWriter(): { writer: D1RestWriter; applied: Statement[][] } {
+  const applied: Statement[][] = [];
+  return {
+    writer: {
+      async apply(statements) {
+        applied.push(statements);
+      },
+    },
+    applied,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -389,5 +414,85 @@ describe('runIngest', () => {
     assert.match(stdout(), /\[call\] channels\.list/);
     assert.match(stdout(), /\[call\] playlistItems\.list/);
     assert.match(stdout(), /\[video\] vid1 comments=1/);
+  });
+
+  it('--remote exits 1 listing the missing env vars, before any API call', async () => {
+    const { transport, calls } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+
+    const code = await runIngest({ channel: '@test', remote: true, transport, now: FIXED_NOW });
+
+    assert.equal(code, 1);
+    assert.match(
+      stderr(),
+      /--remote requires CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, D1_DATABASE_ID/,
+    );
+    assert.equal(calls.length, 0);
+    assert.doesNotMatch(stdout(), /\[4\/8\]/);
+    assert.equal(existsSync(dbPath), false);
+  });
+
+  it('--remote writes through the D1 writer and skips the local database', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+    const { writer, applied } = fakeWriter();
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      writer,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 0);
+    assert.equal(applied.length, 1);
+    const statements = applied[0]!;
+    // channel + 2 videos + 2 comments + 2 anchors, in FK order.
+    assert.equal(statements.length, 7);
+    assert.match(statements[0]!.sql, /INSERT INTO channels/);
+    assert.match(statements.at(-1)!.sql, /INSERT INTO time_anchors/);
+    assert.equal(existsSync(dbPath), false);
+    assert.match(stdout(), /channels=1 videos=2 comments=2 anchors=2 duration=\d/);
+  });
+
+  it('--remote exits 1 when the D1 write fails', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+    const writer: D1RestWriter = {
+      apply: async () => {
+        throw new Error('D1 HTTP API rejected the batch: invalid token');
+      },
+    };
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      writer,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 1);
+    assert.match(stderr(), /D1 HTTP API rejected the batch: invalid token/);
+    assert.equal(existsSync(dbPath), false);
   });
 });
