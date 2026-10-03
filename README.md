@@ -48,7 +48,7 @@ Locally, the run commits in a single transaction. Anything that fails mid-run le
 
 `--remote` writes the whole run to the production D1 database over the D1 HTTP API instead of `catalog.sqlite` (ADR-0003). Fill the credentials in `.env` — see [`.env.example`](.env.example):
 
-- `CLOUDFLARE_API_TOKEN` — needs **D1 Write**; the "Edit Cloudflare Workers" API token template works.
+- `CLOUDFLARE_API_TOKEN` — needs **D1 Write** plus Workers Scripts Write: start from the "Edit Cloudflare Workers" template and **add D1 Write** (the template alone does not include D1). Scope the token to your account.
 - `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account id.
 - `D1_DATABASE_ID` — the `ytb-index` database id.
 
