@@ -58,6 +58,17 @@ Then open:
 - `http://localhost:3000/` — catalog index (one row per video: thumbnail, title, published date, `N comments / K timestamped`).
 - `http://localhost:3000/v/<videoId>` — video detail page; all top-level comments newest-first, with timestamped comments accented and a `Timestamps:` footer listing every detected offset as a clickable link.
 
+### Run the Worker locally
+
+The production read path is a Cloudflare Worker over D1 (ADR-0002). Wrangler serves the same routes on `:8787`:
+
+```bash
+pnpm exec wrangler d1 migrations apply ytb-index --local   # apply migrations/ to local D1
+pnpm dev:worker                                            # http://localhost:8787
+```
+
+The local Worker D1 is miniflare's storage under `.wrangler/` — it is **separate from `catalog.sqlite`**, the file the Node server and `pnpm ingest` use. That separation is intended (ADR-0002's dual-engine setup): the Node path stays the fast local dev/test/ingest loop, while the Worker path mirrors production D1.
+
 ## Configuration
 
 | Env var | Required by | Notes |
@@ -87,8 +98,10 @@ The authoritative artifact for the SQLite schema is [`migrations/0001_init.sql`]
 | Script | What it does |
 | --- | --- |
 | `pnpm dev` | Watch + serve the SSR app on `:3000`. |
+| `pnpm dev:worker` | Serve the Worker locally with `wrangler dev` on `:8787`. |
 | `pnpm build` | Type-check and emit to `dist/`. |
 | `pnpm start` | Run the built server (`node dist/server/index.js`). |
+| `pnpm deploy` | Deploy the Worker with `wrangler deploy`. |
 | `pnpm ingest <channel>` | Run the one-shot ingest pipeline. |
 | `pnpm typecheck` | `tsc --noEmit` against the project config. |
 | `pnpm test` | Run `node --test` suites under `src/**/*.test.ts`. |

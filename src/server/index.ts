@@ -1,48 +1,19 @@
 /**
- * Hono app factory and HTTP entry point for ytb-index (`server/index`).
+ * Node HTTP entry point for ytb-index (`server/index`).
  *
- * `createApp({ dbPath })` opens the catalog once (better-sqlite3 `Executor`,
- * migrations applied) and mounts the two SSR routes (`/`, `/v/:videoId`).
- * `start({ dbPath, port })` serves that app with `@hono/node-server`. Running
- * this module directly (`pnpm dev` / `pnpm start`) starts the server and
+ * The Hono app factory itself lives in `./app.ts` (the Worker import graph,
+ * free of Node builtins). This module is Node-only: it opens the catalog with
+ * the better-sqlite3 executor and serves the app with `@hono/node-server`.
+ * Running it directly (`pnpm dev` / `pnpm start`) starts the server and
  * honours `--port` / `DB_PATH`.
  *
  * The server reads the catalog only; it never touches `src/yt` or the YouTube
  * API key (spec §6 / #11).
  */
-import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { pathToFileURL } from 'node:url';
-import type { Executor } from '../db/executor.ts';
 import { openCatalog } from '../db/sqlite.ts';
-import { catalogRoute } from './routes/catalog.ts';
-import { videoRoute } from './routes/video.ts';
-
-/** Options for {@link createApp}. */
-export interface CreateAppOptions {
-  /** SQLite path or `:memory:`. Defaults to `./catalog.sqlite`. */
-  dbPath?: string;
-  /** Pre-opened executor (used by tests). When given, `dbPath` is ignored. */
-  db?: Executor;
-}
-
-/**
- * Build a fresh Hono app bound to one `Executor`.
- *
- * Passing a pre-opened `db` lets integration tests seed an in-memory database
- * and then exercise the real routes against the same executor. Otherwise the
- * catalog at `dbPath` is opened and migrated first.
- */
-export async function createApp({
-  dbPath = './catalog.sqlite',
-  db,
-}: CreateAppOptions = {}): Promise<Hono> {
-  const executor = db ?? (await openCatalog(dbPath));
-  const app = new Hono();
-  catalogRoute(app, executor);
-  videoRoute(app, executor);
-  return app;
-}
+import { createApp } from './app.ts';
 
 /** Options for {@link start}. */
 export interface StartOptions {
@@ -57,7 +28,7 @@ export async function start({
   dbPath = './catalog.sqlite',
   port = 3000,
 }: StartOptions = {}): Promise<void> {
-  const app = await createApp({ dbPath });
+  const app = await createApp({ db: await openCatalog(dbPath) });
   serve({ fetch: app.fetch, port });
 }
 
