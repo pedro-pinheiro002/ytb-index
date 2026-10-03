@@ -4,7 +4,7 @@
  * One-shot pipeline: validate the API key, parse the channel argument, then
  * resolve the channel, page its uploads playlist, enrich the videos in batches
  * of 50, fetch each video's top-level comments, detect `TimeAnchor`s, and
- * persist everything in a single SQLite transaction.
+ * persist everything in a single atomic `Executor.batch`.
  *
  * Sources of decisions:
  *  - `docs/spec/v1.md` §5 (ordered steps + error matrix + logging).
@@ -28,8 +28,8 @@ import type {
 } from '../yt/client.ts';
 import { detectAnchors } from '../yt/anchors.ts';
 import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
-import { openSqlite } from '../db/sqlite.ts';
-import { upsertAnchors, upsertChannel, upsertComments, upsertVideos } from '../db/queries.ts';
+import { openCatalog } from '../db/sqlite.ts';
+import { ingestStatements } from '../db/queries.ts';
 import type {
   Channel,
   ChannelInput,
@@ -223,9 +223,9 @@ export async function runIngest(
     throw err;
   }
 
-  // 3. Open the catalog database (schema applied idempotently).
+  // 3. Open the catalog database (migrations applied idempotently).
   log(`[3/8] Opening catalog database at ${dbPath}...`);
-  const db = openSqlite(dbPath);
+  const db = await openCatalog(dbPath);
 
   const client = createYouTubeClient({
     apiKey,
@@ -246,7 +246,10 @@ export async function runIngest(
     return result;
   }
 
-  /** Steps 4–10, inside the caller's transaction. Throws on any failure. */
+  /**
+   * Steps 4–10. Reads the API and accumulates rows; every write is deferred to
+   * one atomic batch in step 10. Throws on any failure.
+   */
   async function runPipeline(): Promise<IngestSummary> {
     const fetchedAt = now().toISOString();
 
@@ -262,14 +265,13 @@ export async function runIngest(
       throw new ChannelNotFoundError(channelInput.value);
     }
 
-    // 5. Upsert the channel row.
+    // 5. Build the channel row (persisted with everything else in step 10).
     const channel: Channel = {
       id: resource.id,
       title: resource.snippet.title,
       uploadsPlaylistId: resource.contentDetails.relatedPlaylists.uploads,
       fetchedAt,
     };
-    upsertChannel(db, channel);
 
     // 6. Page the uploads playlist, collecting video IDs (1 unit/page).
     log('[5/8] Fetching uploads playlist...');
@@ -296,7 +298,7 @@ export async function runIngest(
       if (playlistPageToken === undefined) break;
     }
 
-    // 7. Batch-enrich videos in chunks of ≤50 (1 unit/batch) and upsert.
+    // 7. Batch-enrich videos in chunks of ≤50 (1 unit/batch).
     log(`[6/8] Enriching ${videoIds.length} videos...`);
     const videos: VideoRecord[] = [];
     for (let offset = 0; offset < videoIds.length; offset += VIDEO_BATCH_SIZE) {
@@ -306,7 +308,6 @@ export async function runIngest(
         videos.push(toVideoRecord(item, channel.id, fetchedAt));
       }
     }
-    upsertVideos(db, videos);
 
     // 8. Per-video comment pages (1 unit/page), top-level comments only.
     log(`[7/8] Fetching comments for ${videos.length} videos...`);
@@ -378,9 +379,10 @@ export async function runIngest(
       });
     }
 
-    // 10. Upsert comments + anchors.
-    upsertComments(db, comments);
-    upsertAnchors(db, anchors);
+    // 10. Persist everything in one atomic batch: channel → videos → comments
+    // → anchors (FK order). `batch` is all-or-nothing, preserving ADR-0001's
+    // guarantee that a failed run leaves the previous catalog untouched.
+    await db.batch(ingestStatements({ channel, videos, comments, anchors }));
 
     return {
       channels: 1,
@@ -390,34 +392,24 @@ export async function runIngest(
     };
   }
 
-  // The whole run is one transaction: BEGIN before any write, COMMIT only if
-  // every stage succeeds. Any throw rolls back, leaving the previous catalog.
-  let summary: IngestSummary;
+  // The whole run is one atomic batch: nothing is written until step 10
+  // succeeds, so any throw leaves the previous catalog untouched.
   try {
-    db.exec('BEGIN');
-    try {
-      summary = await runPipeline();
-      db.exec('COMMIT');
-    } catch (err) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {
-        // The connection may already be unusable; the close() below still runs.
-      }
-      return reportIngestError(err);
-    }
+    const summary = await runPipeline();
+
+    // 12. Summary.
+    const durationSeconds = (Date.now() - startTimeMs) / 1000;
+    log('Done.');
+    log(
+      `channels=${summary.channels} videos=${summary.videos} comments=${summary.comments} ` +
+        `anchors=${summary.anchors} duration=${durationSeconds.toFixed(1)}s quota=${quota.total}`,
+    );
+    return 0;
+  } catch (err) {
+    return reportIngestError(err);
   } finally {
     db.close();
   }
-
-  // 12. Summary.
-  const durationSeconds = (Date.now() - startTimeMs) / 1000;
-  log('Done.');
-  log(
-    `channels=${summary.channels} videos=${summary.videos} comments=${summary.comments} ` +
-      `anchors=${summary.anchors} duration=${durationSeconds.toFixed(1)}s quota=${quota.total}`,
-  );
-  return 0;
 }
 
 // CLI shim — only runs when invoked directly (`tsx src/cli/ingest.ts`).

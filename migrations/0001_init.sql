@@ -20,8 +20,9 @@
 --                       No catalogs table (out-of-scope per Q1 of #8).
 --   TimestampedComment -> derived at read time: comment WHERE has_anchors = 1.
 
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
+-- Connection pragmas (`foreign_keys`, `journal_mode = WAL`) are local-driver
+-- settings, applied in src/db/sqlite.ts — never in shared migration SQL: they
+-- are per-connection and D1 does not support them.
 
 -- =========================================================================
 -- channels

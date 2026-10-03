@@ -1,21 +1,27 @@
 /**
- * Read/write queries over the v1 SQLite catalog schema.
+ * Read/write queries over the v1 catalog schema.
  *
  * Write path (used by the ingest CLI, #T06): idempotent upserts of a channel,
- * its videos, their comments, and the detected time anchors. Each multi-row
- * upsert runs inside a single transaction so a partially-ingested catalog is
- * never visible.
+ * its videos, their comments, and the detected time anchors. Every statement
+ * is portable SQLite — positional `?` parameters only, no engine-specific
+ * pragmas — and runs through the async `Executor`, so the same strings work on
+ * the local better-sqlite3 driver and on production D1.
+ *
+ * `ingestStatements` bundles a whole run into one flat statement list for
+ * `Executor.batch`, which is atomic (all-or-nothing), so a partially-ingested
+ * catalog is never visible. The per-entity `upsert*` helpers keep their old
+ * one-transaction-per-call behavior by batching their own statements.
  *
  * Read path (used by the Hono server): the catalog list, a video's comments
  * (via the TTL-redacting `comments_active` view), and the channel's
  * last-refresh timestamp.
  *
  * All data here is locally constructed, but we still bind every value through
- * prepared statements (never string-interpolate user data). See
- * `docs/spec/v1/schema.sql`.
+ * prepared statements (never string-interpolate user data). The schema lives
+ * in `migrations/0001_init.sql`.
  */
 import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
-import type { DbHandle } from './sqlite.ts';
+import type { Executor, Statement } from './executor.ts';
 
 // ---------------------------------------------------------------------------
 // Upserts
@@ -23,16 +29,24 @@ import type { DbHandle } from './sqlite.ts';
 
 const UPSERT_CHANNEL_SQL = `
   INSERT INTO channels (id, title, uploads_playlist_id, fetched_at)
-  VALUES (@id, @title, @uploadsPlaylistId, @fetchedAt)
+  VALUES (?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     title = excluded.title,
     uploads_playlist_id = excluded.uploads_playlist_id,
     fetched_at = excluded.fetched_at
 `;
 
+function channelParams(channel: Channel): unknown[] {
+  return [channel.id, channel.title, channel.uploadsPlaylistId, channel.fetchedAt];
+}
+
+function channelStatement(channel: Channel): Statement {
+  return { sql: UPSERT_CHANNEL_SQL, params: channelParams(channel) };
+}
+
 /** Insert or overwrite the single ingested channel row. */
-export function upsertChannel(handle: DbHandle, channel: Channel): void {
-  handle.prepare(UPSERT_CHANNEL_SQL).run(channel);
+export async function upsertChannel(executor: Executor, channel: Channel): Promise<void> {
+  await executor.run(UPSERT_CHANNEL_SQL, channelParams(channel));
 }
 
 const UPSERT_VIDEO_SQL = `
@@ -40,10 +54,7 @@ const UPSERT_VIDEO_SQL = `
     id, channel_id, title, description, published_at, thumbnail_url,
     duration_iso8601, view_count, like_count, comment_count, fetched_at
   )
-  VALUES (
-    @id, @channelId, @title, @description, @publishedAt, @thumbnailUrl,
-    @durationIso8601, @viewCount, @likeCount, @commentCount, @fetchedAt
-  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     channel_id = excluded.channel_id,
     title = excluded.title,
@@ -57,15 +68,29 @@ const UPSERT_VIDEO_SQL = `
     fetched_at = excluded.fetched_at
 `;
 
-/** Insert or overwrite every given video in one transaction. */
-export function upsertVideos(handle: DbHandle, videos: VideoRecord[]): void {
-  const insert = handle.prepare(UPSERT_VIDEO_SQL);
-  const tx = handle.transaction((rows: VideoRecord[]) => {
-    for (const row of rows) {
-      insert.run(row);
-    }
-  });
-  tx(videos);
+function videoParams(video: VideoRecord): unknown[] {
+  return [
+    video.id,
+    video.channelId,
+    video.title,
+    video.description,
+    video.publishedAt,
+    video.thumbnailUrl,
+    video.durationIso8601,
+    video.viewCount,
+    video.likeCount,
+    video.commentCount,
+    video.fetchedAt,
+  ];
+}
+
+function videoStatements(videos: VideoRecord[]): Statement[] {
+  return videos.map((video) => ({ sql: UPSERT_VIDEO_SQL, params: videoParams(video) }));
+}
+
+/** Insert or overwrite every given video in one atomic batch. */
+export async function upsertVideos(executor: Executor, videos: VideoRecord[]): Promise<void> {
+  await executor.batch(videoStatements(videos));
 }
 
 const UPSERT_COMMENT_SQL = `
@@ -73,10 +98,7 @@ const UPSERT_COMMENT_SQL = `
     id, video_id, channel_id, author, text, published_at,
     like_count, has_anchors, fetched_at
   )
-  VALUES (
-    @id, @videoId, @channelId, @author, @text, @publishedAt,
-    @likeCount, @hasAnchors, @fetchedAt
-  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     video_id = excluded.video_id,
     channel_id = excluded.channel_id,
@@ -88,38 +110,78 @@ const UPSERT_COMMENT_SQL = `
     fetched_at = excluded.fetched_at
 `;
 
-/** Insert or overwrite every given comment in one transaction. */
-export function upsertComments(handle: DbHandle, comments: CommentRecord[]): void {
-  const insert = handle.prepare(UPSERT_COMMENT_SQL);
-  const tx = handle.transaction((rows: CommentRecord[]) => {
-    for (const row of rows) {
-      insert.run(row);
-    }
-  });
-  tx(comments);
+function commentParams(comment: CommentRecord): unknown[] {
+  return [
+    comment.id,
+    comment.videoId,
+    comment.channelId,
+    comment.author,
+    comment.text,
+    comment.publishedAt,
+    comment.likeCount,
+    comment.hasAnchors,
+    comment.fetchedAt,
+  ];
+}
+
+function commentStatements(comments: CommentRecord[]): Statement[] {
+  return comments.map((comment) => ({ sql: UPSERT_COMMENT_SQL, params: commentParams(comment) }));
+}
+
+/** Insert or overwrite every given comment in one atomic batch. */
+export async function upsertComments(executor: Executor, comments: CommentRecord[]): Promise<void> {
+  await executor.batch(commentStatements(comments));
 }
 
 const UPSERT_ANCHOR_SQL = `
   INSERT INTO time_anchors (comment_id, seconds, raw_text, char_position)
-  VALUES (@commentId, @seconds, @rawText, @charPosition)
+  VALUES (?, ?, ?, ?)
   ON CONFLICT(comment_id, seconds) DO UPDATE SET
     raw_text = excluded.raw_text,
     char_position = MIN(time_anchors.char_position, excluded.char_position)
 `;
 
+function anchorParams(anchor: TimeAnchor): unknown[] {
+  return [anchor.commentId, anchor.seconds, anchor.rawText, anchor.charPosition];
+}
+
+function anchorStatements(anchors: TimeAnchor[]): Statement[] {
+  return anchors.map((anchor) => ({ sql: UPSERT_ANCHOR_SQL, params: anchorParams(anchor) }));
+}
+
 /**
- * Insert or overwrite every given anchor in one transaction. The
+ * Insert or overwrite every given anchor in one atomic batch. The
  * `(comment_id, seconds)` primary key dedupes anchors; on conflict we keep the
  * *earliest* `char_position` so re-ingesting never loses ordering provenance.
  */
-export function upsertAnchors(handle: DbHandle, anchors: TimeAnchor[]): void {
-  const insert = handle.prepare(UPSERT_ANCHOR_SQL);
-  const tx = handle.transaction((rows: TimeAnchor[]) => {
-    for (const row of rows) {
-      insert.run(row);
-    }
-  });
-  tx(anchors);
+export async function upsertAnchors(executor: Executor, anchors: TimeAnchor[]): Promise<void> {
+  await executor.batch(anchorStatements(anchors));
+}
+
+// ---------------------------------------------------------------------------
+// Ingest batch
+// ---------------------------------------------------------------------------
+
+/** Everything one ingest run writes, in FK-safe order. */
+export interface IngestRows {
+  channel: Channel;
+  videos: VideoRecord[];
+  comments: CommentRecord[];
+  anchors: TimeAnchor[];
+}
+
+/**
+ * Flatten one ingest run into a single statement list for `Executor.batch`.
+ * Order is channels → videos → comments → anchors so foreign keys resolve;
+ * the batch itself is atomic (ADR-0001's all-or-nothing catalog refresh).
+ */
+export function ingestStatements({ channel, videos, comments, anchors }: IngestRows): Statement[] {
+  return [
+    channelStatement(channel),
+    ...videoStatements(videos),
+    ...commentStatements(comments),
+    ...anchorStatements(anchors),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +230,8 @@ function toVideoRecord(row: VideoRow): VideoRecord {
  * Every video in the catalog, newest-first by `published_at`. v1 ingests a
  * single channel, so no channel filter is needed.
  */
-export function listCatalog(handle: DbHandle): VideoRecord[] {
-  const rows = handle.prepare(LIST_CATALOG_SQL).all() as VideoRow[];
+export async function listCatalog(executor: Executor): Promise<VideoRecord[]> {
+  const rows = await executor.all<VideoRow>(LIST_CATALOG_SQL);
   return rows.map(toVideoRecord);
 }
 
@@ -217,8 +279,11 @@ function toCommentRecord(row: CommentActiveRow): CommentRecord {
  * `comments_active` view so TTL redaction (ADR-0001) and the derived
  * `expires_at` / `is_expired` columns flow through.
  */
-export function listVideoComments(handle: DbHandle, videoId: string): CommentRecord[] {
-  const rows = handle.prepare(LIST_VIDEO_COMMENTS_SQL).all(videoId) as CommentActiveRow[];
+export async function listVideoComments(
+  executor: Executor,
+  videoId: string,
+): Promise<CommentRecord[]> {
+  const rows = await executor.all<CommentActiveRow>(LIST_VIDEO_COMMENTS_SQL, [videoId]);
   return rows.map(toCommentRecord);
 }
 
@@ -230,8 +295,7 @@ const CHANNEL_LAST_REFRESHED_SQL = `
  * `fetched_at` of the most recently refreshed channel, or `null` if the
  * catalog is empty.
  */
-export function channelLastRefreshed(handle: DbHandle): string | null {
-  const row = handle.prepare(CHANNEL_LAST_REFRESHED_SQL).get() as
-    { fetched_at: string } | undefined;
+export async function channelLastRefreshed(executor: Executor): Promise<string | null> {
+  const row = await executor.get<{ fetched_at: string }>(CHANNEL_LAST_REFRESHED_SQL);
   return row?.fetched_at ?? null;
 }
