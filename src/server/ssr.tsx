@@ -163,6 +163,44 @@ function timestampsFooter(videoId: string, anchors: Anchor[]): Html | string {
   return html`<p class="timestamps">Timestamps: ${links}</p>`;
 }
 
+/**
+ * Wrap every `TimeAnchor` substring inside `text` in a click-jump link.
+ *
+ * Anchors are located by `charPosition` + `rawText.length` (not by searching
+ * for the raw text), so repeated timestamps linkify independently. Anchors are
+ * processed earliest-first; an anchor is skipped when it overlaps a previous
+ * one, runs past the end of the text, or no longer matches the text at its
+ * recorded position (e.g. the redacted TTL placeholder, which contains no
+ * anchors). Surrounding text is escaped by the `html` helper; the anchor tags
+ * are injected as already-escaped HTML so they are not double-encoded.
+ */
+function linkifyAnchors(text: string, anchors: Anchor[], videoId: string): Html {
+  const sorted = [...anchors].sort((a, b) => a.charPosition - b.charPosition);
+  const parts: Array<Html | string> = [];
+  let cursor = 0;
+
+  for (const anchor of sorted) {
+    const start = anchor.charPosition;
+    const end = start + anchor.rawText.length;
+    if (start < cursor || end > text.length || text.slice(start, end) !== anchor.rawText) {
+      continue;
+    }
+    parts.push(text.slice(cursor, start));
+    parts.push(
+      html`<a
+        target="_blank"
+        rel="noopener noreferrer"
+        href="https://www.youtube.com/watch?v=${videoId}&t=${anchor.seconds}s"
+        >${anchor.rawText}</a
+      >`,
+    );
+    cursor = end;
+  }
+
+  parts.push(text.slice(cursor));
+  return html`${parts}`;
+}
+
 /** One top-level comment; timestamped comments get the accent border + footer. */
 function commentItem(videoId: string, comment: CommentRecord, anchors: Anchor[]): Html {
   const timestamped = anchors.length > 0;
@@ -174,7 +212,7 @@ function commentItem(videoId: string, comment: CommentRecord, anchors: Anchor[])
       ${comment.author} ·
       <time datetime="${comment.publishedAt}">${relativeDate(comment.publishedAt)}</time>
     </p>
-    <p class="comment-body"><b>${comment.text}</b></p>
+    <p class="comment-body">${linkifyAnchors(comment.text, anchors, videoId)}</p>
     ${timestampsFooter(videoId, anchors)}
   </li>`;
 }

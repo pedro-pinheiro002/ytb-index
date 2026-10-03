@@ -134,6 +134,31 @@ describe('renderVideo', () => {
     }
   });
 
+  it('linkifies TimeAnchor substrings inside the comment body', () => {
+    const comment: CommentRecord = {
+      ...TIMESTAMPED_COMMENT,
+      id: 'c-body',
+      text: 'jump to 5:32 for the best part',
+    };
+    const anchors: TimeAnchor[] = [
+      { commentId: 'c-body', seconds: 332, rawText: '5:32', charPosition: 8 },
+    ];
+
+    const out = renderVideo(VIDEO, [comment], anchors);
+    const normalized = normalizeTags(out);
+    const link =
+      '<a target="_blank" rel="noopener noreferrer" href="https://www.youtube.com/watch?v=vid1&t=332s">5:32</a>';
+
+    assert.ok(normalized.includes(link), 'in-text anchor is a click-jump link');
+    assert.ok(
+      normalized.includes(`jump to ${link} for the best part`),
+      'body text is preserved around the in-text link',
+    );
+    // Not double-escaped: the timestamp is visible text, not an entity.
+    assert.ok(visibleText(out).includes('jump to 5:32 for the best part'));
+    assert.ok(!out.includes('&amp;t=332s'), 'href ampersand is not double-escaped');
+  });
+
   it('omits the Timestamps footer for a comment without anchors', () => {
     const plain: CommentRecord = {
       ...TIMESTAMPED_COMMENT,
