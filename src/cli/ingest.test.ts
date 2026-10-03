@@ -197,13 +197,25 @@ const PLAYLIST_PAGE: PlaylistItemListResponse = {
 const VIDEOS: VideoResource[] = [
   {
     id: 'vid1',
-    snippet: { title: 'Video One', publishedAt: '2024-01-01T00:00:00Z', channelId: CHANNEL.id },
+    snippet: {
+      title: 'Video One',
+      description: '',
+      publishedAt: '2024-01-01T00:00:00Z',
+      channelId: CHANNEL.id,
+      thumbnails: { high: { url: 'https://i.ytimg.com/vi/vid1/hqdefault.jpg' } },
+    },
     contentDetails: { duration: 'PT1M' },
     statistics: { viewCount: '10', likeCount: '1', commentCount: '1' },
   },
   {
     id: 'vid2',
-    snippet: { title: 'Video Two', publishedAt: '2024-01-02T00:00:00Z', channelId: CHANNEL.id },
+    snippet: {
+      title: 'Video Two',
+      description: '',
+      publishedAt: '2024-01-02T00:00:00Z',
+      channelId: CHANNEL.id,
+      thumbnails: { high: { url: 'https://i.ytimg.com/vi/vid2/hqdefault.jpg' } },
+    },
     contentDetails: { duration: 'PT2M' },
     statistics: { viewCount: '20', likeCount: '2', commentCount: '1' },
   },

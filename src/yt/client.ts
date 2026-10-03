@@ -178,12 +178,28 @@ export interface PlaylistItemListResponse {
   nextPageToken?: string;
 }
 
+/** Thumbnail entry as returned by YouTube Data API v3 `videos.list` (`snippet.thumbnails.*`). */
+export interface VideoThumbnail {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
 export interface VideoResource {
   id: string;
   snippet: {
     title: string;
+    description: string;
     publishedAt: string;
     channelId?: string;
+    /** `snippet.thumbnails` — pick the highest-resolution entry at the call site. */
+    thumbnails: {
+      default?: VideoThumbnail;
+      medium?: VideoThumbnail;
+      high?: VideoThumbnail;
+      standard?: VideoThumbnail;
+      maxres?: VideoThumbnail;
+    };
   };
   contentDetails: { duration: string };
   statistics?: {
