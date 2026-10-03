@@ -8,7 +8,7 @@
 import type { Hono } from 'hono';
 import { html } from 'hono/html';
 import { listCatalog, listVideoComments } from '../../db/queries.ts';
-import type { DbHandle } from '../../db/sqlite.ts';
+import type { Executor } from '../../db/executor.ts';
 import type { TimeAnchor } from '../../shared/types.ts';
 import { renderVideo } from '../ssr.tsx';
 
@@ -42,8 +42,8 @@ const NOT_FOUND_HTML = html`<!doctype html>
  * Every anchor for the video's comments, flat. Expired comments keep their
  * anchors (ADR-0001: the anchor existed; only the body is redacted).
  */
-function listAnchorsForVideo(db: DbHandle, videoId: string): TimeAnchor[] {
-  const rows = db.prepare(SELECT_ANCHORS_SQL).all(videoId) as AnchorRow[];
+async function listAnchorsForVideo(db: Executor, videoId: string): Promise<TimeAnchor[]> {
+  const rows = await db.all<AnchorRow>(SELECT_ANCHORS_SQL, [videoId]);
   return rows.map((row) => ({
     commentId: row.comment_id,
     seconds: row.seconds,
@@ -53,18 +53,18 @@ function listAnchorsForVideo(db: DbHandle, videoId: string): TimeAnchor[] {
 }
 
 /**
- * Mount `GET /v/:videoId` on `app`. `db` is the live handle owned by the app
+ * Mount `GET /v/:videoId` on `app`. `db` is the executor owned by the app
  * factory (see `createApp`).
  */
-export function videoRoute(app: Hono, db: DbHandle): void {
-  app.get('/v/:videoId', (c) => {
+export function videoRoute(app: Hono, db: Executor): void {
+  app.get('/v/:videoId', async (c) => {
     const videoId = c.req.param('videoId');
-    const video = listCatalog(db).find((candidate) => candidate.id === videoId);
+    const video = (await listCatalog(db)).find((candidate) => candidate.id === videoId);
     if (video === undefined) {
       return c.html(NOT_FOUND_HTML, 404);
     }
-    const comments = listVideoComments(db, videoId);
-    const anchors = listAnchorsForVideo(db, videoId);
+    const comments = await listVideoComments(db, videoId);
+    const anchors = await listAnchorsForVideo(db, videoId);
     return c.html(renderVideo(video, comments, anchors));
   });
 }

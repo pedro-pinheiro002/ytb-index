@@ -10,7 +10,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
-import { openSqlite, type DbHandle } from '../db/sqlite.ts';
+import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { upsertAnchors, upsertChannel, upsertComments, upsertVideos } from '../db/queries.ts';
 import { createApp } from './index.ts';
 
@@ -50,18 +50,22 @@ const COMMENT: CommentRecord = {
 const ANCHOR: TimeAnchor = { commentId: COMMENT.id, seconds: 83, rawText: '1:23', charPosition: 8 };
 
 /** Seed an in-memory catalog and wrap it in the real app. */
-function seededApp(): { app: ReturnType<typeof createApp>; db: DbHandle } {
-  const db = openSqlite(':memory:');
-  upsertChannel(db, CHANNEL);
-  upsertVideos(db, [VIDEO]);
-  upsertComments(db, [COMMENT]);
-  upsertAnchors(db, [ANCHOR]);
-  return { app: createApp({ db }), db };
+async function seededApp(): Promise<{
+  app: Awaited<ReturnType<typeof createApp>>;
+  db: SqliteExecutor;
+}> {
+  const db = await openCatalog(':memory:');
+  await upsertChannel(db, CHANNEL);
+  await upsertVideos(db, [VIDEO]);
+  await upsertComments(db, [COMMENT]);
+  await upsertAnchors(db, [ANCHOR]);
+  const app = await createApp({ db });
+  return { app, db };
 }
 
 describe('server routes', () => {
   it('GET / renders the catalog as HTML', async () => {
-    const { app, db } = seededApp();
+    const { app, db } = await seededApp();
     try {
       const res = await app.fetch(new Request('http://localhost/'));
       assert.equal(res.status, 200);
@@ -75,7 +79,7 @@ describe('server routes', () => {
   });
 
   it('GET /v/:videoId renders the video detail as HTML', async () => {
-    const { app, db } = seededApp();
+    const { app, db } = await seededApp();
     try {
       const res = await app.fetch(new Request('http://localhost/v/vid-int'));
       assert.equal(res.status, 200);
@@ -89,7 +93,7 @@ describe('server routes', () => {
   });
 
   it('GET /v/:videoId returns a text/html 404 for an unknown video', async () => {
-    const { app, db } = seededApp();
+    const { app, db } = await seededApp();
     try {
       const res = await app.fetch(new Request('http://localhost/v/missing'));
       assert.equal(res.status, 404);

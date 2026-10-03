@@ -10,7 +10,7 @@
  */
 import type { Hono } from 'hono';
 import { listCatalog } from '../../db/queries.ts';
-import type { DbHandle } from '../../db/sqlite.ts';
+import type { Executor } from '../../db/executor.ts';
 import type { Channel } from '../../shared/types.ts';
 import { renderCatalog, type CatalogVideo } from '../ssr.tsx';
 
@@ -40,8 +40,8 @@ const TIMESTAMPED_COUNTS_SQL = `
 `;
 
 /** The most recently refreshed channel, or `null` when nothing is ingested. */
-function selectChannel(db: DbHandle): Channel | null {
-  const row = db.prepare(SELECT_CHANNEL_SQL).get() as ChannelRow | undefined;
+async function selectChannel(db: Executor): Promise<Channel | null> {
+  const row = await db.get<ChannelRow>(SELECT_CHANNEL_SQL);
   if (row === undefined) {
     return null;
   }
@@ -54,20 +54,20 @@ function selectChannel(db: DbHandle): Channel | null {
 }
 
 /** Map of `video_id` → number of that video's comments holding an anchor. */
-function timestampedCounts(db: DbHandle): Map<string, number> {
-  const rows = db.prepare(TIMESTAMPED_COUNTS_SQL).all() as TimestampedCountRow[];
+async function timestampedCounts(db: Executor): Promise<Map<string, number>> {
+  const rows = await db.all<TimestampedCountRow>(TIMESTAMPED_COUNTS_SQL);
   return new Map(rows.map((row) => [row.video_id, Number(row.timestamped ?? 0)]));
 }
 
 /**
- * Mount `GET /` on `app`. `db` is the live handle owned by the app factory
- * (see `createApp`); the handler issues synchronous reads per request.
+ * Mount `GET /` on `app`. `db` is the executor owned by the app factory
+ * (see `createApp`); the handler awaits the per-request reads.
  */
-export function catalogRoute(app: Hono, db: DbHandle): void {
-  app.get('/', (c) => {
-    const channel = selectChannel(db);
-    const counts = timestampedCounts(db);
-    const videos: CatalogVideo[] = listCatalog(db).map((video) => ({
+export function catalogRoute(app: Hono, db: Executor): void {
+  app.get('/', async (c) => {
+    const channel = await selectChannel(db);
+    const counts = await timestampedCounts(db);
+    const videos: CatalogVideo[] = (await listCatalog(db)).map((video) => ({
       ...video,
       timestampedCount: counts.get(video.id) ?? 0,
     }));

@@ -20,7 +20,7 @@ import type {
   Transport,
   VideoResource,
 } from '../yt/client.ts';
-import { openSqlite } from '../db/sqlite.ts';
+import { openCatalog } from '../db/sqlite.ts';
 import { API_KEY_FAILURE_MESSAGES } from '../yt/api-key.ts';
 import { runIngest } from './ingest.ts';
 
@@ -67,19 +67,22 @@ afterEach(() => {
 const stdout = (): string => outChunks.join('');
 const stderr = (): string => errChunks.join('');
 
-function count(sql: string): number {
-  const db = openSqlite(dbPath);
+async function count(sql: string): Promise<number> {
+  const db = await openCatalog(dbPath);
   try {
-    return (db.prepare(sql).get() as { c: number }).c;
+    const result = await db.get<{ c: number }>(sql);
+    return result?.c ?? 0;
   } finally {
     db.close();
   }
 }
 
-function row(sql: string): Record<string, unknown> {
-  const db = openSqlite(dbPath);
+async function row(sql: string): Promise<Record<string, unknown>> {
+  const db = await openCatalog(dbPath);
   try {
-    return db.prepare(sql).get() as Record<string, unknown>;
+    const result = await db.get<Record<string, unknown>>(sql);
+    assert.ok(result !== undefined, `expected a row from: ${sql}`);
+    return result;
   } finally {
     db.close();
   }
@@ -269,19 +272,22 @@ describe('runIngest', () => {
     assert.equal(code, 0);
 
     // DB rows.
-    assert.equal(count('SELECT count(*) AS c FROM channels'), 1);
-    assert.equal(count('SELECT count(*) AS c FROM videos'), 2);
-    assert.equal(count('SELECT count(*) AS c FROM comments'), 2);
-    assert.equal(count('SELECT count(*) AS c FROM time_anchors'), 2);
-    assert.equal(count('SELECT count(*) AS c FROM comments WHERE has_anchors = 1'), 2);
+    assert.equal(await count('SELECT count(*) AS c FROM channels'), 1);
+    assert.equal(await count('SELECT count(*) AS c FROM videos'), 2);
+    assert.equal(await count('SELECT count(*) AS c FROM comments'), 2);
+    assert.equal(await count('SELECT count(*) AS c FROM time_anchors'), 2);
+    assert.equal(await count('SELECT count(*) AS c FROM comments WHERE has_anchors = 1'), 2);
 
-    assert.deepEqual(row('SELECT id, title FROM channels'), {
+    assert.deepEqual(await row('SELECT id, title FROM channels'), {
       id: CHANNEL.id,
       title: CHANNEL.title,
     });
-    assert.equal(row('SELECT fetched_at FROM channels')['fetched_at'], '2024-03-01T00:00:00.000Z');
     assert.equal(
-      row('SELECT fetched_at FROM videos LIMIT 1')['fetched_at'],
+      (await row('SELECT fetched_at FROM channels'))['fetched_at'],
+      '2024-03-01T00:00:00.000Z',
+    );
+    assert.equal(
+      (await row('SELECT fetched_at FROM videos LIMIT 1'))['fetched_at'],
       '2024-03-01T00:00:00.000Z',
     );
 
@@ -306,10 +312,13 @@ describe('runIngest', () => {
     const code = await runIngest({ channel: '@test', dbPath, transport, now: FIXED_NOW });
 
     assert.equal(code, 0);
-    assert.equal(count('SELECT count(*) AS c FROM videos'), 2);
+    assert.equal(await count('SELECT count(*) AS c FROM videos'), 2);
     // Only vid2's comment survived.
-    assert.equal(count('SELECT count(*) AS c FROM comments'), 1);
-    assert.deepEqual(row('SELECT id, video_id FROM comments'), { id: 'c2', video_id: 'vid2' });
+    assert.equal(await count('SELECT count(*) AS c FROM comments'), 1);
+    assert.deepEqual(await row('SELECT id, video_id FROM comments'), {
+      id: 'c2',
+      video_id: 'vid2',
+    });
     assert.match(stdout(), /\[skip\] vid1: commentsDisabled/);
   });
 
@@ -332,8 +341,8 @@ describe('runIngest', () => {
 
     assert.equal(code, 2);
     assert.match(stderr(), /quota exhausted/);
-    // Transaction rolled back: nothing persisted.
-    assert.equal(count('SELECT count(*) AS c FROM channels'), 0);
+    // Nothing persisted: no batch ran.
+    assert.equal(await count('SELECT count(*) AS c FROM channels'), 0);
   });
 
   it('exits 1 with the spec message when YOUTUBE_API_KEY is missing', async () => {

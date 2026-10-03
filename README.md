@@ -80,7 +80,7 @@ src/
 
 Dependency arrows: `server → db → shared`, `cli → yt → shared`, `cli → db → shared`. `shared/` is the leaf.
 
-The authoritative artifact for the SQLite schema is [`docs/spec/v1/schema.sql`](docs/spec/v1/schema.sql).
+The authoritative artifact for the SQLite schema is [`migrations/0001_init.sql`](migrations/0001_init.sql).
 
 ## Scripts
 
