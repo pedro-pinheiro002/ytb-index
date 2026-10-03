@@ -4,7 +4,9 @@
  * One-shot pipeline: validate the API key, parse the channel argument, then
  * resolve the channel, page its uploads playlist, enrich the videos in batches
  * of 50, fetch each video's top-level comments, detect `TimeAnchor`s, and
- * persist everything in a single atomic `Executor.batch`.
+ * persist everything. Default target is the local SQLite catalog (one atomic
+ * `Executor.batch`); `--remote` sends the same statements to the production D1
+ * database over the D1 HTTP API instead (chunked, best-effort — ADR-0003).
  *
  * Sources of decisions:
  *  - `docs/spec/v1.md` §5 (ordered steps + error matrix + logging).
@@ -14,6 +16,8 @@
  *  - `transport` — the same `(url, init?) => Promise<Response>` seam the
  *    YouTube client already exposes.
  *  - `quota` — inject a `QuotaCounter` (defaults to a fresh 9500-unit budget).
+ *  - `writer` — inject a `D1RestWriter` for `--remote` (defaults to the
+ *    env-configured HTTP writer).
  *  - `now` — override the clock so `fetched_at` values are deterministic.
  */
 import 'dotenv/config';
@@ -28,7 +32,8 @@ import type {
 } from '../yt/client.ts';
 import { detectAnchors } from '../yt/anchors.ts';
 import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
-import { openCatalog } from '../db/sqlite.ts';
+import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
+import { createD1RestWriter, type D1RestWriter } from '../db/d1-http.ts';
 import { ingestStatements } from '../db/queries.ts';
 import type {
   Channel,
@@ -40,6 +45,12 @@ import type {
 
 const DEFAULT_DB_PATH = './catalog.sqlite';
 const DEFAULT_API_KEY_ENV = 'YOUTUBE_API_KEY';
+/** Environment variables required by `--remote` (D1 HTTP API, ADR-0003). */
+const REMOTE_ENV_VARS = [
+  'CLOUDFLARE_API_TOKEN',
+  'CLOUDFLARE_ACCOUNT_ID',
+  'D1_DATABASE_ID',
+] as const;
 const VIDEO_BATCH_SIZE = 50;
 const PLAYLIST_PAGE_SIZE = 50;
 const COMMENT_PAGE_SIZE = 100;
@@ -174,17 +185,22 @@ export async function runIngest(
   args: {
     channel?: string;
     verbose?: boolean;
+    /** Write to remote D1 over the HTTP API instead of the local catalog. */
+    remote?: boolean;
     dbPath?: string;
     /** Injectable transport — used by tests. Defaults to `globalThis.fetch`. */
     transport?: Transport;
     /** Injectable quota counter — used by tests. Defaults to `new QuotaCounter()`. */
     quota?: QuotaCounter;
+    /** Injectable D1 writer — used by tests. Defaults to the env-configured HTTP writer. */
+    writer?: D1RestWriter;
     /** Override NOW (ms) — used by tests for deterministic `fetchedAt`. */
     now?: () => Date;
   } = {},
 ): Promise<number> {
   const startTimeMs = Date.now();
   const verbose = args.verbose ?? false;
+  const remote = args.remote ?? false;
   const dbPath = args.dbPath ?? DEFAULT_DB_PATH;
   const now = args.now ?? ((): Date => new Date());
   const quota = args.quota ?? new QuotaCounter();
@@ -223,9 +239,28 @@ export async function runIngest(
     throw err;
   }
 
-  // 3. Open the catalog database (migrations applied idempotently).
-  log(`[3/8] Opening catalog database at ${dbPath}...`);
-  const db = await openCatalog(dbPath);
+  // 3. Prepare the write target: the local SQLite catalog by default, or the
+  // remote D1 database over the HTTP API with `--remote`.
+  let db: SqliteExecutor | undefined;
+  let writer: D1RestWriter | undefined;
+  if (remote) {
+    log('[3/8] Configuring remote D1 write...');
+    const missing = REMOTE_ENV_VARS.filter((name) => (process.env[name] ?? '') === '');
+    if (missing.length > 0) {
+      error(`Error: --remote requires ${missing.join(', ')}. Check the values in .env.`);
+      return 1;
+    }
+    writer =
+      args.writer ??
+      createD1RestWriter({
+        accountId: process.env['CLOUDFLARE_ACCOUNT_ID'] ?? '',
+        databaseId: process.env['D1_DATABASE_ID'] ?? '',
+        token: process.env['CLOUDFLARE_API_TOKEN'] ?? '',
+      });
+  } else {
+    log(`[3/8] Opening catalog database at ${dbPath}...`);
+    db = await openCatalog(dbPath);
+  }
 
   const client = createYouTubeClient({
     apiKey,
@@ -248,7 +283,8 @@ export async function runIngest(
 
   /**
    * Steps 4–10. Reads the API and accumulates rows; every write is deferred to
-   * one atomic batch in step 10. Throws on any failure.
+   * step 10 (one atomic batch locally, chunked best-effort calls remotely).
+   * Throws on any failure.
    */
   async function runPipeline(): Promise<IngestSummary> {
     const fetchedAt = now().toISOString();
@@ -379,10 +415,16 @@ export async function runIngest(
       });
     }
 
-    // 10. Persist everything in one atomic batch: channel → videos → comments
-    // → anchors (FK order). `batch` is all-or-nothing, preserving ADR-0001's
-    // guarantee that a failed run leaves the previous catalog untouched.
-    await db.batch(ingestStatements({ channel, videos, comments, anchors }));
+    // 10. Persist the whole run: channel → videos → comments → anchors (FK
+    // order). Locally this is one atomic batch (ADR-0001 all-or-nothing);
+    // remotely it is chunked, best-effort D1 HTTP calls (no documented
+    // atomicity) that rely on the idempotent upserts + re-run for repair.
+    const statements = ingestStatements({ channel, videos, comments, anchors });
+    if (writer !== undefined) {
+      await writer.apply(statements);
+    } else if (db !== undefined) {
+      await db.batch(statements);
+    }
 
     return {
       channels: 1,
@@ -392,8 +434,9 @@ export async function runIngest(
     };
   }
 
-  // The whole run is one atomic batch: nothing is written until step 10
-  // succeeds, so any throw leaves the previous catalog untouched.
+  // The whole run is one write step: locally nothing lands until the atomic
+  // batch succeeds (any throw leaves the previous catalog untouched); remotely
+  // a failed chunk leaves earlier idempotent upserts in place — re-run repairs.
   try {
     const summary = await runPipeline();
 
@@ -408,7 +451,7 @@ export async function runIngest(
   } catch (err) {
     return reportIngestError(err);
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
@@ -419,8 +462,13 @@ const isCli =
 if (isCli) {
   const args = process.argv.slice(2);
   const verbose = args.includes('--verbose');
+  const remote = args.includes('--remote');
   const channel = args.find((a) => !a.startsWith('--'));
-  runIngest({ ...(channel !== undefined ? { channel } : {}), verbose }).then(
+  runIngest({
+    ...(channel !== undefined ? { channel } : {}),
+    verbose,
+    remote,
+  }).then(
     (code) => process.exit(code),
     (err: unknown) => {
       process.stderr.write(`Error: ${(err as Error).message}\n`);

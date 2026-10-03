@@ -42,7 +42,21 @@ pnpm ingest --verbose @mkbhd        # extra logging
 
 Accepted inputs (`src/yt/parse-channel.ts`): `@handle`, bare `handle`, `UC…` channel ID, or any canonical YouTube URL pointing at either.
 
-The run commits in a single transaction. Anything that fails mid-run leaves the previous catalog untouched.
+Locally, the run commits in a single transaction. Anything that fails mid-run leaves the previous catalog untouched.
+
+### Remote ingest (D1)
+
+`--remote` writes the whole run to the production D1 database over the D1 HTTP API instead of `catalog.sqlite` (ADR-0003). Fill the credentials in `.env` — see [`.env.example`](.env.example):
+
+- `CLOUDFLARE_API_TOKEN` — needs **D1 Write**; the "Edit Cloudflare Workers" API token template works.
+- `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account id.
+- `D1_DATABASE_ID` — the `ytb-index` database id.
+
+```bash
+pnpm ingest @mkbhd --remote
+```
+
+Remote writes are chunked (~20 statements per HTTP call) and best-effort, not transactional: the D1 HTTP API does not document atomicity for its batch endpoint. Upserts are idempotent, so a failed or partial write is repaired by re-running the same command. Exit codes match local ingest (`1` on a failed write).
 
 ### Serve the catalog
 
