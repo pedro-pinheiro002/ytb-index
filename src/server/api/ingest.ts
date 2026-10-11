@@ -53,6 +53,21 @@ const SELECT_ACTIVE_REQUEST_SQL = `
   LIMIT 1
 `;
 
+/**
+ * An active request with no status write for this long is presumed dead
+ * (ADR-0005). The runner job is capped at 360 min (`timeout-minutes`) and
+ * writes `running` right after it starts, so a `running` row older than this
+ * cannot belong to a live job. A `queued` row this old means the dispatch was
+ * never picked up.
+ */
+const STALE_ACTIVE_AFTER_MS = 6 * 60 * 60 * 1000;
+
+const RECLAIM_STALE_REQUESTS_SQL = `
+  UPDATE ingest_requests
+  SET status = 'failed', error = ?, updated_at = ?, finished_at = ?
+  WHERE channel_key = ? AND status IN ('queued', 'running') AND updated_at < ?
+`;
+
 const INSERT_REQUEST_SQL = `
   INSERT INTO ingest_requests (
     id, channel_input, channel_key, channel_id, status,
@@ -128,13 +143,22 @@ export function ingestApiRoute(app: Hono, db: Executor, config: IngestApiConfig 
       return c.json({ error: normalized.error }, 400);
     }
 
+    const nowDate = now();
+    await db.run(RECLAIM_STALE_REQUESTS_SQL, [
+      'stale: no status update within the runner time limit',
+      nowDate.toISOString(),
+      nowDate.toISOString(),
+      normalized.channelKey,
+      new Date(nowDate.getTime() - STALE_ACTIVE_AFTER_MS).toISOString(),
+    ]);
+
     const active = await db.get<{ id: string }>(SELECT_ACTIVE_REQUEST_SQL, [normalized.channelKey]);
     if (active !== undefined) {
       return c.json({ requestId: active.id }, 409);
     }
 
     const requestId = uuid();
-    const createdAt = now().toISOString();
+    const createdAt = nowDate.toISOString();
     try {
       await db.run(INSERT_REQUEST_SQL, [
         requestId,

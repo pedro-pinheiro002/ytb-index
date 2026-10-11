@@ -259,6 +259,37 @@ describe('POST /api/ingest', () => {
     }
   });
 
+  it('reclaims an active request older than the runner limit, but not a fresh one', async () => {
+    const { transport } = fakeTransport(new Response(null, { status: 204 }));
+    const start = Date.UTC(2026, 0, 1, 0, 0, 0);
+    let current = start;
+    const { app, db } = await testApp({ transport, now: () => new Date(current) });
+    try {
+      assert.equal((await postIngest(app, '@MKBHD')).status, 202);
+
+      current = start + 5 * 60 * 60 * 1000 + 59 * 60 * 1000;
+      const fresh = await postIngest(app, '@MKBHD');
+      assert.equal(fresh.status, 409);
+      assert.deepEqual(await fresh.json(), { requestId: 'req-1' });
+
+      current = start + 6 * 60 * 60 * 1000 + 60 * 1000;
+      const reclaimed = await postIngest(app, '@MKBHD');
+      assert.equal(reclaimed.status, 202);
+      assert.deepEqual(await reclaimed.json(), { requestId: 'req-2' });
+
+      const rows = await requestRows(db);
+      assert.deepEqual(
+        rows.map((row) => [row.id, row.status, row.error?.startsWith('stale:') ?? false]),
+        [
+          ['req-1', 'failed', true],
+          ['req-2', 'queued', false],
+        ],
+      );
+    } finally {
+      db.close();
+    }
+  });
+
   it('accepts a new request once the previous one is done', async () => {
     const { transport } = fakeTransport(new Response(null, { status: 204 }));
     const { app, db } = await testApp({ transport });
