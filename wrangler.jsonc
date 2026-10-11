@@ -10,4 +10,12 @@
       "migrations_dir": "migrations",
     },
   ],
+  // repository_dispatch coordinates for the operator ingest API (ADR-0005).
+  // Public info — safe in the repo. The secrets are set out-of-band:
+  //   wrangler secret put OPERATOR_TOKEN    # Bearer token for POST /api/ingest
+  //   wrangler secret put GH_DISPATCH_PAT   # fine-grained PAT, Contents: write
+  "vars": {
+    "GH_OWNER": "pedro-pinheiro002",
+    "GH_REPO": "ytb-index",
+  },
 }

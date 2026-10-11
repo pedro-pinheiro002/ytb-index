@@ -20,6 +20,7 @@ const EXPECTED_SCHEMA_OBJECTS = [
   'comments',
   'time_anchors',
   'comments_active',
+  'ingest_requests',
   'd1_migrations',
 ];
 
@@ -41,7 +42,7 @@ describe('openCatalog', () => {
       const applied = await db.all<{ name: string }>('SELECT name FROM d1_migrations');
       assert.deepEqual(
         applied.map((row) => row.name),
-        ['0001_init.sql'],
+        ['0001_init.sql', '0002_ingest_requests.sql'],
       );
     } finally {
       db.close();
@@ -64,7 +65,7 @@ describe('openCatalog', () => {
           assert.ok(names.has(object), `expected schema object ${object} after re-open`);
         }
         const applied = await second.all<{ name: string }>('SELECT name FROM d1_migrations');
-        assert.equal(applied.length, 1);
+        assert.equal(applied.length, 2);
       } finally {
         second.close();
       }

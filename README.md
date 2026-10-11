@@ -83,12 +83,26 @@ pnpm dev:worker                                            # http://localhost:87
 
 The local Worker D1 is miniflare's storage under `.wrangler/` — it is **separate from `catalog.sqlite`**, the file the Node server and `pnpm ingest` use. That separation is intended (ADR-0002's dual-engine setup): the Node path stays the fast local dev/test/ingest loop, while the Worker path mirrors production D1.
 
+### Trigger an ingest (Operator)
+
+`POST /api/ingest` records an IngestRequest and fires a GitHub `repository_dispatch`; `GET /api/ingest/status` is public (204 until the first request). Reads stay public, writes require the operator token. Set the two Worker secrets once (never committed):
+
+```bash
+pnpm exec wrangler secret put OPERATOR_TOKEN    # Bearer token for POST /api/ingest
+pnpm exec wrangler secret put GH_DISPATCH_PAT   # fine-grained PAT, Contents: write
+```
+
+`GH_OWNER` / `GH_REPO` are plain `vars` in `wrangler.jsonc` (public info). Locally, `pnpm dev` reads the same names from `.env` — see [`.env.example`](.env.example).
+
 ## Configuration
 
 | Env var | Required by | Notes |
 | --- | --- | --- |
 | `YOUTUBE_API_KEY` | `pnpm ingest` | Validated locally before any API call: presence + `^AIza[A-Za-z0-9_-]{30,50}$`. |
 | `DB_PATH` | server | Path to SQLite file. Defaults to `./catalog.sqlite`. |
+| `OPERATOR_TOKEN` | `POST /api/ingest` | Bearer token for the operator API. Worker secret in production; `.env` for `pnpm dev`. |
+| `GH_DISPATCH_PAT` | `POST /api/ingest` | Fine-grained PAT (Contents: write) for `repository_dispatch`. Worker secret; `.env` for `pnpm dev`. |
+| `GH_OWNER` / `GH_REPO` | `POST /api/ingest` | GitHub coordinates for the dispatch. Wrangler `vars` (public info); `.env` for `pnpm dev`. |
 
 Validation happens at step 1 of the ingest pipeline, before CLI parsing, before the DB is opened. A bad key never burns quota. See [spec §8](docs/spec/v1.md#8-api-key-management).
 

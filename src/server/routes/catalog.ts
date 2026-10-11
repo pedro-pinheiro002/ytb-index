@@ -9,29 +9,17 @@
  * data-in / string-out.
  */
 import type { Hono } from 'hono';
-import { listCatalog } from '../../db/queries.ts';
+import { html } from 'hono/html';
 import type { Executor } from '../../db/executor.ts';
-import type { Channel } from '../../shared/types.ts';
-import { renderCatalog, type CatalogVideo } from '../ssr.tsx';
-
-interface ChannelRow {
-  id: string;
-  title: string;
-  uploads_playlist_id: string;
-  fetched_at: string;
-}
+import type { VideoRecord } from '../../shared/types.ts';
+import { loadCatalog, listChannels, loadLatestIngestStatus } from '../data.ts';
+import type { CatalogVideo } from '../ssr.tsx';
+import { renderCatalog } from '../ssr.tsx';
 
 interface TimestampedCountRow {
   video_id: string;
   timestamped: number | null;
 }
-
-const SELECT_CHANNEL_SQL = `
-  SELECT id, title, uploads_playlist_id, fetched_at
-  FROM channels
-  ORDER BY fetched_at DESC
-  LIMIT 1
-`;
 
 const TIMESTAMPED_COUNTS_SQL = `
   SELECT video_id, SUM(has_anchors) AS timestamped
@@ -39,38 +27,55 @@ const TIMESTAMPED_COUNTS_SQL = `
   GROUP BY video_id
 `;
 
-/** The most recently refreshed channel, or `null` when nothing is ingested. */
-async function selectChannel(db: Executor): Promise<Channel | null> {
-  const row = await db.get<ChannelRow>(SELECT_CHANNEL_SQL);
-  if (row === undefined) {
-    return null;
-  }
-  return {
-    id: row.id,
-    title: row.title,
-    uploadsPlaylistId: row.uploads_playlist_id,
-    fetchedAt: row.fetched_at,
-  };
-}
-
 /** Map of `video_id` → number of that video's comments holding an anchor. */
 async function timestampedCounts(db: Executor): Promise<Map<string, number>> {
   const rows = await db.all<TimestampedCountRow>(TIMESTAMPED_COUNTS_SQL);
   return new Map(rows.map((row) => [row.video_id, Number(row.timestamped ?? 0)]));
 }
 
+async function withTimestampedCounts(db: Executor, videos: VideoRecord[]): Promise<CatalogVideo[]> {
+  const counts = await timestampedCounts(db);
+  return videos.map((video) => ({
+    ...video,
+    timestampedCount: counts.get(video.id) ?? 0,
+  }));
+}
+
+const NOT_FOUND_CHANNEL_HTML = html`<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>Not found — ytb-index</title>
+    </head>
+    <body>
+      <h1>404 Not Found</h1>
+      <p>Unknown channel.</p>
+    </body>
+  </html>`.toString();
+
 /**
- * Mount `GET /` on `app`. `db` is the executor owned by the app factory
- * (see `createApp`); the handler awaits the per-request reads.
+ * Mount `GET /` and `GET /c/:channelId` on `app`. `db` is the executor owned
+ * by the app factory (see `createApp`); the handler awaits the per-request reads.
  */
 export function catalogRoute(app: Hono, db: Executor): void {
   app.get('/', async (c) => {
-    const channel = await selectChannel(db);
-    const counts = await timestampedCounts(db);
-    const videos: CatalogVideo[] = (await listCatalog(db)).map((video) => ({
-      ...video,
-      timestampedCount: counts.get(video.id) ?? 0,
-    }));
-    return c.html(renderCatalog(channel, videos));
+    const catalog = await loadCatalog(db);
+    const channel = catalog?.channel ?? null;
+    const videos = catalog === null ? [] : await withTimestampedCounts(db, catalog.videos);
+    const channels = (await listChannels(db)).map((ch) => ({ id: ch.channelId, title: ch.title }));
+    const status = await loadLatestIngestStatus(db);
+    return c.html(renderCatalog(channel, videos, channels, status));
+  });
+
+  app.get('/c/:channelId', async (c) => {
+    const channelId = c.req.param('channelId');
+    const catalog = await loadCatalog(db, channelId);
+    if (catalog === null) {
+      return c.html(NOT_FOUND_CHANNEL_HTML, 404);
+    }
+    const videos = await withTimestampedCounts(db, catalog.videos);
+    const channels = (await listChannels(db)).map((ch) => ({ id: ch.channelId, title: ch.title }));
+    const status = await loadLatestIngestStatus(db);
+    return c.html(renderCatalog(catalog.channel, videos, channels, status));
   });
 }

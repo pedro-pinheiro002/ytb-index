@@ -13,10 +13,18 @@ import type { Hono } from 'hono';
 import { createD1Executor, type D1Binding } from './db/d1.ts';
 import { createApp } from './server/app.ts';
 
-/** Bindings available to the Worker (see `wrangler.jsonc` `d1_databases`). */
+/** Bindings available to the Worker (see `wrangler.jsonc`). */
 export interface Env {
   /** D1 database bound as `ytb_index`. */
   ytb_index: D1Binding;
+  /** Operator bearer token for `POST /api/ingest` (secret). */
+  OPERATOR_TOKEN?: string;
+  /** Fine-grained GitHub PAT for `repository_dispatch` (secret). */
+  GH_DISPATCH_PAT?: string;
+  /** GitHub owner for `repository_dispatch` (plain var). */
+  GH_OWNER?: string;
+  /** GitHub repository name for `repository_dispatch` (plain var). */
+  GH_REPO?: string;
 }
 
 // Built lazily: `env` is only available inside `fetch()`.
@@ -24,7 +32,15 @@ let appPromise: Promise<Hono> | undefined;
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
-    appPromise ??= createApp({ db: createD1Executor(env.ytb_index) });
+    appPromise ??= createApp({
+      db: createD1Executor(env.ytb_index),
+      ingest: {
+        operatorToken: env.OPERATOR_TOKEN,
+        dispatchPat: env.GH_DISPATCH_PAT,
+        ghOwner: env.GH_OWNER,
+        ghRepo: env.GH_REPO,
+      },
+    });
     return appPromise.then((app) => app.fetch(request, env));
   },
 };

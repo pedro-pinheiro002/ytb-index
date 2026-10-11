@@ -1,6 +1,6 @@
 # TTL policy for API-key-fetched YouTube data
 
-ytb-index v1 fetches public YouTube data (videos, comments, anchors) using only an API key. Developer Policies III.E.4.d caps storage of such "Non-Authorized Data" at 30 calendar days; we treat that cap as binding — the term is undefined in the policies but the natural reading covers API-key-fetched public data, and the asymmetry of error (cheap column vs. losing API access) is too lopsided to gamble. v1 implements belt-and-suspenders: every public-API-data row carries `fetched_at`; users refresh via `pnpm ingest` (which overwrites); if no refresh happens within 30 days, comment text is replaced with a placeholder at read time so the project can't drift into a ToS violation from a missed refresh.
+ytb-index v1 fetches public YouTube data (videos, comments, anchors) using only an API key. Developer Policies III.E.4.d caps storage of such "Non-Authorized Data" at 30 calendar days; we treat that cap as binding — the term is undefined in the policies but the natural reading covers API-key-fetched public data, and the asymmetry of error (cheap column vs. losing API access) is too lopsided to gamble. v1 implements belt-and-suspenders: every public-API-data row carries `fetched_at`; users refresh by triggering an ingest from the web app (ADR-0005), which overwrites; if no refresh happens within 30 days, comment text is replaced with a placeholder at read time so the project can't drift into a ToS violation from a missed refresh.
 
 ## Status
 

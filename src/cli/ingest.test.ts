@@ -25,7 +25,7 @@ import { openCatalog } from '../db/sqlite.ts';
 import type { D1RestWriter } from '../db/d1-http.ts';
 import type { Statement } from '../db/executor.ts';
 import { API_KEY_FAILURE_MESSAGES } from '../yt/api-key.ts';
-import { runIngest } from './ingest.ts';
+import { parseIngestArgs, runIngest } from './ingest.ts';
 
 // A valid-shape key: `AIza` + 35 URL-safe chars.
 const VALID_KEY = `AIza${'x'.repeat(35)}`;
@@ -494,5 +494,290 @@ describe('runIngest', () => {
     assert.equal(code, 1);
     assert.match(stderr(), /D1 HTTP API rejected the batch: invalid token/);
     assert.equal(existsSync(dbPath), false);
+  });
+
+  it('--report-status without --remote exits 1 before any API call', async () => {
+    const { transport, calls } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+
+    const code = await runIngest({
+      channel: '@test',
+      reportStatus: 'req-1',
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 1);
+    assert.match(stderr(), /--report-status requires --remote/);
+    assert.equal(calls.length, 0);
+    assert.equal(existsSync(dbPath), false);
+  });
+
+  it('--remote --report-status reports running then done with the final counts', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+    const { writer, applied } = fakeWriter();
+    const { writer: statusWriter, applied: statusApplied } = fakeWriter();
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      reportStatus: 'req-1',
+      writer,
+      statusWriter,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 0);
+    // Catalog write is unchanged: one apply with all seven statements.
+    assert.equal(applied.length, 1);
+    assert.equal(applied[0]!.length, 7);
+    // Status lifecycle: running (with resolved channel id) → done (counts).
+    assert.equal(statusApplied.length, 2);
+    const running = statusApplied[0]![0]!;
+    assert.match(running.sql, /status = 'running'/);
+    assert.deepEqual(running.params, [CHANNEL.id, '2024-03-01T00:00:00.000Z', 'req-1']);
+    const done = statusApplied[1]![0]!;
+    assert.match(done.sql, /status = 'done'/);
+    assert.match(done.sql, /finished_at = \?/);
+    assert.deepEqual(done.params, [
+      2,
+      2,
+      '2024-03-01T00:00:00.000Z',
+      '2024-03-01T00:00:00.000Z',
+      'req-1',
+    ]);
+    assert.match(stdout(), /channels=1 videos=2 comments=2 anchors=2 duration=\d/);
+    assert.equal(existsSync(dbPath), false);
+  });
+
+  it('--remote --report-status marks the request failed when the pipeline fails', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+    // Fail after the run is reported running: quota exhaustion while fetching
+    // comments (step 8).
+    const quotaTransport: Transport = async (url) => {
+      if (new URL(url).pathname.endsWith('/commentThreads')) {
+        return apiErrorResponse(403, 'quotaExceeded', 'quota exceeded');
+      }
+      return transport(url);
+    };
+    const { writer, applied } = fakeWriter();
+    const { writer: statusWriter, applied: statusApplied } = fakeWriter();
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      reportStatus: 'req-1',
+      writer,
+      statusWriter,
+      transport: quotaTransport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 2);
+    // Nothing was persisted; the failure is still reported.
+    assert.equal(applied.length, 0);
+    assert.equal(statusApplied.length, 2);
+    assert.match(statusApplied[0]![0]!.sql, /status = 'running'/);
+    const failed = statusApplied[1]![0]!;
+    assert.match(failed.sql, /status = 'failed'/);
+    assert.match(failed.sql, /finished_at = \?/);
+    const params = failed.params as unknown[];
+    assert.match(params[0] as string, /quota exceeded/i);
+    assert.equal(params[1], '2024-03-01T00:00:00.000Z');
+    assert.equal(params[2], '2024-03-01T00:00:00.000Z');
+    assert.equal(params[3], 'req-1');
+  });
+
+  it('--remote --report-status keeps the ingest running when status updates fail', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+    const { writer, applied } = fakeWriter();
+    const statusWriter: D1RestWriter = {
+      apply: async () => {
+        throw new Error('D1 HTTP request failed after 5 attempts');
+      },
+    };
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      reportStatus: 'req-1',
+      writer,
+      statusWriter,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 0);
+    assert.equal(applied.length, 1);
+    assert.match(stdout(), /channels=1 videos=2 comments=2 anchors=2 duration=\d/);
+    assert.match(stderr(), /\[WARN\] status update for ingest request req-1 failed/);
+  });
+
+  it('--remote --report-status marks the request failed on a pre-start API key failure', async () => {
+    // No D1 env vars: the injected `writer` doubles as the status-writer
+    // fallback, and the reporter still covers the step-1 failure.
+    process.env['YOUTUBE_API_KEY'] = '';
+    const { transport, calls } = makeTransport({});
+    const { writer, applied } = fakeWriter();
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      reportStatus: 'req-1',
+      writer,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 1);
+    assert.match(stderr(), /YOUTUBE_API_KEY is not set/);
+    assert.doesNotMatch(stderr(), /--report-status disabled/);
+    assert.equal(calls.length, 0);
+    assert.equal(applied.length, 1);
+    const failed = applied[0]![0]!;
+    assert.match(failed.sql, /status = 'failed'/);
+    const params = failed.params as unknown[];
+    assert.match(params[0] as string, /YOUTUBE_API_KEY is not set/);
+    assert.equal(params[1], '2024-03-01T00:00:00.000Z');
+    assert.equal(params[2], '2024-03-01T00:00:00.000Z');
+    assert.equal(params[3], 'req-1');
+  });
+
+  it('--remote --report-status marks the request failed on a bad channel input', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport, calls } = makeTransport({});
+    const { writer: statusWriter, applied: statusApplied } = fakeWriter();
+
+    const code = await runIngest({
+      channel: 'https://example.com/watch?v=abc',
+      remote: true,
+      reportStatus: 'req-1',
+      statusWriter,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 1);
+    assert.match(stderr(), /unrecognised channel input/);
+    assert.equal(calls.length, 0);
+    assert.equal(statusApplied.length, 1);
+    const failed = statusApplied[0]![0]!;
+    assert.match(failed.sql, /status = 'failed'/);
+    assert.match((failed.params as unknown[])[0] as string, /unrecognised channel input/);
+  });
+
+  it('--remote --report-status warns and proceeds when the D1 env is missing', async () => {
+    const { transport, calls } = makeTransport({
+      channel: CHANNEL,
+      playlistPages: [PLAYLIST_PAGE],
+      videos: VIDEOS,
+      comments: COMMENTS,
+    });
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      reportStatus: 'req-1',
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 1);
+    assert.match(
+      stderr(),
+      /\[WARN\] --report-status disabled: missing CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, D1_DATABASE_ID/,
+    );
+    // The run proceeds to `--remote`'s own env check; no status row was touched.
+    assert.match(
+      stderr(),
+      /--remote requires CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, D1_DATABASE_ID/,
+    );
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe('parseIngestArgs', () => {
+  it('parses the channel, --remote, and a --report-status value', () => {
+    assert.deepEqual(parseIngestArgs(['@test', '--remote', '--report-status', 'req-1']), {
+      channel: '@test',
+      verbose: false,
+      remote: true,
+      reportStatus: 'req-1',
+    });
+  });
+
+  it('accepts the inline --report-status=<id> form and any flag order', () => {
+    assert.deepEqual(parseIngestArgs(['--report-status=req-2', '@test', '--verbose', '--remote']), {
+      channel: '@test',
+      verbose: true,
+      remote: true,
+      reportStatus: 'req-2',
+    });
+  });
+
+  it('does not mistake the --report-status value for the channel', () => {
+    const parsed = parseIngestArgs(['--remote', '--report-status', 'req-3']);
+    assert.equal(parsed.channel, undefined);
+    assert.equal(parsed.reportStatus, 'req-3');
+  });
+
+  it('errors when --report-status has no value', () => {
+    assert.deepEqual(parseIngestArgs(['@test', '--remote', '--report-status']), {
+      channel: '@test',
+      verbose: false,
+      remote: true,
+      error: '--report-status requires a <requestId> value.',
+    });
+  });
+
+  it('errors on an empty --report-status= value', () => {
+    const parsed = parseIngestArgs(['@test', '--remote', '--report-status=']);
+    assert.equal(parsed.error, '--report-status requires a <requestId> value.');
+  });
+
+  it('errors when --report-status is given without --remote', () => {
+    assert.equal(
+      parseIngestArgs(['@test', '--report-status', 'req-4']).error,
+      '--report-status requires --remote.',
+    );
+  });
+
+  it('keeps the existing behavior of ignoring unknown flags', () => {
+    assert.deepEqual(parseIngestArgs(['--verbose', '@test', '--unknown']), {
+      channel: '@test',
+      verbose: true,
+      remote: false,
+    });
   });
 });

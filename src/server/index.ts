@@ -2,14 +2,17 @@
  * Node HTTP entry point for ytb-index (`server/index`).
  *
  * The Hono app factory itself lives in `./app.ts` (the Worker import graph,
- * free of Node builtins). This module is Node-only: it opens the catalog with
- * the better-sqlite3 executor and serves the app with `@hono/node-server`.
- * Running it directly (`pnpm dev` / `pnpm start`) starts the server and
- * honours `--port` / `DB_PATH`.
+ * free of Node builtins). This module is Node-only: it loads `.env` (the same
+ * convention as the CLI), opens the catalog with the better-sqlite3 executor,
+ * and serves the app with `@hono/node-server`. Running it directly
+ * (`pnpm dev` / `pnpm start`) starts the server and honours `--port` /
+ * `DB_PATH`.
  *
  * The server reads the catalog only; it never touches `src/yt` or the YouTube
- * API key (spec §6 / #11).
+ * API key (spec §6 / #11). The ingest API's operator token and GitHub PAT come
+ * from `.env` locally (Worker secrets in production, ADR-0005).
  */
+import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { pathToFileURL } from 'node:url';
 import { openCatalog } from '../db/sqlite.ts';
@@ -28,7 +31,15 @@ export async function start({
   dbPath = './catalog.sqlite',
   port = 3000,
 }: StartOptions = {}): Promise<void> {
-  const app = await createApp({ db: await openCatalog(dbPath) });
+  const app = await createApp({
+    db: await openCatalog(dbPath),
+    ingest: {
+      operatorToken: process.env.OPERATOR_TOKEN,
+      dispatchPat: process.env.GH_DISPATCH_PAT,
+      ghOwner: process.env.GH_OWNER,
+      ghRepo: process.env.GH_REPO,
+    },
+  });
   serve({ fetch: app.fetch, port });
 }
 

@@ -1,0 +1,43 @@
+name: Ingest
+
+# Operator-triggered ingest (ADR-0005): the web app creates an IngestRequest
+# row in D1 and fires a `repository_dispatch`; this workflow runs the existing
+# CLI pipeline verbatim and reports status back through `--report-status`.
+#
+# `repository_dispatch` always runs the workflow file from the default branch
+# and never exposes secrets to forks, so this job is default-branch-only and
+# secret-safe by construction. No cron: dispatch is event-driven.
+on:
+  repository_dispatch:
+    types: [ingest]
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    name: ingest
+    runs-on: ubuntu-latest
+    # ADR-0005: a full ingest can run for hours; GitHub caps hosted jobs at 6h.
+    timeout-minutes: 360
+    env:
+      # Same env var names the CLI's `--remote` mode already reads.
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run ingest
+        env:
+          # Passed via env, never interpolated into the shell line, so payload
+          # values cannot inject commands.
+          INGEST_CHANNEL: ${{ github.event.client_payload.channel }}
+          INGEST_REQUEST_ID: ${{ github.event.client_payload.requestId }}
+        run: pnpm ingest "$INGEST_CHANNEL" --remote --report-status "$INGEST_REQUEST_ID"

@@ -88,3 +88,37 @@ export interface TimestampedComment extends CommentRecord {
 
 /** Discriminated union produced by `parseChannelInput` (#T03). */
 export type ChannelInput = { kind: 'handle'; value: string } | { kind: 'id'; value: string };
+
+/**
+ * One Operator-submitted ingest run tracked in `ingest_requests`.
+ * Source: GLOSSARY.md / ADR-0005.
+ *
+ * `channelInput`, `channelKey`, and `finishedAt` are the stored row's audit
+ * fields: the loader (`server/data.ts`) always fills them from D1, but the
+ * public status contract and the UI never expose them, so they are optional
+ * for consumers constructing fixtures.
+ */
+export interface IngestRequest {
+  /** Request ID assigned at submission. */
+  id: string;
+  /** Raw operator input, verbatim. */
+  channelInput?: string;
+  /** Normalized identity: UC… id if derivable, else lowercased `@handle`. */
+  channelKey?: string;
+  /** Resolved YouTube channel id; `null` until the ingest resolves it. */
+  channelId: string | null;
+  /** queued → running → done/failed. */
+  status: 'queued' | 'running' | 'done' | 'failed';
+  /** Videos written so far (0 until the runner reports progress). */
+  videosWritten: number;
+  /** Comments written so far. */
+  commentsWritten: number;
+  /** Error message when status is `failed`. */
+  error: string | null;
+  /** ISO-8601 UTC; set once at submission. */
+  createdAt: string;
+  /** ISO-8601 UTC; updated by the runner on every progress tick. */
+  updatedAt: string;
+  /** ISO-8601 UTC; set on done/failed. */
+  finishedAt?: string | null;
+}
