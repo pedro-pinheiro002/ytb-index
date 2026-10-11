@@ -20,7 +20,13 @@
  * prepared statements (never string-interpolate user data). The schema lives
  * in `migrations/0001_init.sql`.
  */
-import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
+import type {
+  Channel,
+  CommentRecord,
+  IngestRequest,
+  TimeAnchor,
+  VideoRecord,
+} from '../shared/types.ts';
 import type { Executor, Statement } from './executor.ts';
 
 // ---------------------------------------------------------------------------
@@ -210,6 +216,15 @@ const LIST_CATALOG_SQL = `
   ORDER BY published_at DESC
 `;
 
+const LIST_CHANNEL_VIDEOS_SQL = `
+  SELECT
+    id, channel_id, title, description, published_at, thumbnail_url,
+    duration_iso8601, view_count, like_count, comment_count, fetched_at
+  FROM videos
+  WHERE channel_id = ?
+  ORDER BY published_at DESC
+`;
+
 function toVideoRecord(row: VideoRow): VideoRecord {
   return {
     id: row.id,
@@ -232,6 +247,19 @@ function toVideoRecord(row: VideoRow): VideoRecord {
  */
 export async function listCatalog(executor: Executor): Promise<VideoRecord[]> {
   const rows = await executor.all<VideoRow>(LIST_CATALOG_SQL);
+  return rows.map(toVideoRecord);
+}
+
+/**
+ * Videos for one channel, newest-first by `published_at`.
+ *
+ * Used by the explicit `/c/:channelId` catalog route via `loadCatalog`.
+ */
+export async function listChannelVideos(
+  executor: Executor,
+  channelId: string,
+): Promise<VideoRecord[]> {
+  const rows = await executor.all<VideoRow>(LIST_CHANNEL_VIDEOS_SQL, [channelId]);
   return rows.map(toVideoRecord);
 }
 
@@ -298,4 +326,84 @@ const CHANNEL_LAST_REFRESHED_SQL = `
 export async function channelLastRefreshed(executor: Executor): Promise<string | null> {
   const row = await executor.get<{ fetched_at: string }>(CHANNEL_LAST_REFRESHED_SQL);
   return row?.fetched_at ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Channel list (for the header switcher)
+// ---------------------------------------------------------------------------
+
+interface ChannelListRow {
+  id: string;
+  title: string;
+}
+
+const LIST_CHANNELS_SQL = `
+  SELECT id, title
+  FROM channels
+  ORDER BY fetched_at DESC, id DESC
+`;
+
+/**
+ * All ingested channels, most-recently-refreshed first.
+ *
+ * Used by the catalog-page channel switcher.
+ */
+export async function listChannels(
+  executor: Executor,
+): Promise<Array<{ id: string; title: string }>> {
+  const rows = await executor.all<ChannelListRow>(LIST_CHANNELS_SQL);
+  return rows.map((row) => ({ id: row.id, title: row.title }));
+}
+
+// ---------------------------------------------------------------------------
+// Ingest request status
+// ---------------------------------------------------------------------------
+
+interface IngestRequestRow {
+  id: string;
+  channel_input: string;
+  channel_key: string;
+  channel_id: string | null;
+  status: string;
+  videos_written: number;
+  comments_written: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+const LATEST_INGEST_STATUS_SQL = `
+  SELECT
+    id, channel_input, channel_key, channel_id, status,
+    videos_written, comments_written, error, created_at, updated_at, finished_at
+  FROM ingest_requests
+  ORDER BY updated_at DESC
+  LIMIT 1
+`;
+
+function toIngestRequest(row: IngestRequestRow): IngestRequest {
+  return {
+    id: row.id,
+    channelInput: row.channel_input,
+    channelKey: row.channel_key,
+    channelId: row.channel_id,
+    status: row.status as IngestRequest['status'],
+    videosWritten: row.videos_written,
+    commentsWritten: row.comments_written,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    finishedAt: row.finished_at,
+  };
+}
+
+/**
+ * The most recently updated IngestRequest, or `null` when none exist.
+ *
+ * Public-read; the UI only reveals it to an Operator with a stored token.
+ */
+export async function loadLatestIngestStatus(executor: Executor): Promise<IngestRequest | null> {
+  const row = await executor.get<IngestRequestRow>(LATEST_INGEST_STATUS_SQL);
+  return row === undefined ? null : toIngestRequest(row);
 }

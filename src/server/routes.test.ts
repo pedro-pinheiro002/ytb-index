@@ -102,4 +102,31 @@ describe('server routes', () => {
       db.close();
     }
   });
+
+  it('GET /c/:channelId renders the explicit channel catalog', async () => {
+    const { app, db } = await seededApp();
+    try {
+      const res = await app.fetch(new Request('http://localhost/c/UC_int_channel'));
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+      const body = await res.text();
+      assert.ok(body.includes('Integration Video'));
+      assert.ok(body.includes('value="UC_int_channel" selected'));
+    } finally {
+      db.close();
+    }
+  });
+
+  it('GET /c/:channelId returns a text/html 404 for an unknown channel', async () => {
+    const { app, db } = await seededApp();
+    try {
+      const res = await app.fetch(new Request('http://localhost/c/UC_missing'));
+      assert.equal(res.status, 404);
+      assert.match(res.headers.get('content-type') ?? '', /text\/html/);
+      const body = await res.text();
+      assert.ok(body.includes('Unknown channel'));
+    } finally {
+      db.close();
+    }
+  });
 });

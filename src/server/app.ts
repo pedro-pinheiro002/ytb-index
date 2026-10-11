@@ -12,6 +12,7 @@
  */
 import { Hono } from 'hono';
 import type { Executor } from '../db/executor.ts';
+import { ingestApiRoute, type IngestApiConfig } from './api/ingest.ts';
 import { catalogRoute } from './routes/catalog.ts';
 import { videoRoute } from './routes/video.ts';
 
@@ -19,6 +20,11 @@ import { videoRoute } from './routes/video.ts';
 export interface CreateAppOptions {
   /** Live executor the routes read through. Required: app.ts never opens a DB. */
   db: Executor;
+  /**
+   * Operator ingest API config (ADR-0005). Omitted in read-only contexts:
+   * `POST /api/ingest` then fails closed (401) while the status read stays up.
+   */
+  ingest?: IngestApiConfig | undefined;
 }
 
 /**
@@ -27,9 +33,10 @@ export interface CreateAppOptions {
  * Passing a pre-opened executor lets the Node server, the Worker, and
  * integration tests share the exact same routes over different drivers.
  */
-export async function createApp({ db }: CreateAppOptions): Promise<Hono> {
+export async function createApp({ db, ingest }: CreateAppOptions): Promise<Hono> {
   const app = new Hono();
   catalogRoute(app, db);
   videoRoute(app, db);
+  ingestApiRoute(app, db, ingest ?? {});
   return app;
 }

@@ -1,22 +1,31 @@
 /**
  * Server-side rendering for ytb-index (`server/ssr`).
  *
- * Source of decisions: wayfinder #20 (T07) + build spec §6 UI (locked).
+ * Source of decisions: wayfinder #20 (T07) + build spec §6 UI (locked),
+ * extended by ADR-0005 (operator-triggered ingest surface).
  *
  * Two pure functions turn plain domain data into complete HTML strings:
  *
- *  - `renderCatalog(channel, videos)` — the `/` index page.
+ *  - `renderCatalog(channel, videos, channels, status)` — the `/` index page
+ *    and the explicit `/c/:channelId` page.
  *  - `renderVideo(video, comments, anchors)` — the `/v/:videoId` detail page.
  *
  * Both use Hono's `html` tagged-template helper, which auto-escapes every
- * interpolated value. There is no client-side JavaScript: every page is a
- * single self-contained string returned to the route handler.
+ * interpolated value. The catalog page adds a small inline operator script
+ * (token storage, trigger fetch, status polling); everything else stays
+ * server-rendered.
  *
  * The functions are side-effect free and do not touch the database, so they
  * are cheap to unit-test with hand-built fixtures.
  */
-import { html } from 'hono/html';
-import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
+import { html, raw } from 'hono/html';
+import type {
+  Channel,
+  CommentRecord,
+  IngestRequest,
+  TimeAnchor,
+  VideoRecord,
+} from '../shared/types.ts';
 
 /** `Anchor` is the shared `TimeAnchor` domain type. */
 export type Anchor = TimeAnchor;
@@ -79,14 +88,47 @@ export function formatTimestamp(seconds: number): string {
   return `${minutes}:${secs}`;
 }
 
+/** Shared catalog-page styles. Kept minimal and utilitarian. */
+const CATALOG_STYLES = `
+  body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 0 1rem 2rem; max-width: 720px; }
+  a { color: #0645ad; }
+  .site-header { display: flex; align-items: baseline; gap: 1rem; padding: 1rem 0; border-bottom: 1px solid #ddd; margin-bottom: 1rem; }
+  .brand { font-weight: 700; }
+  .brand a { text-decoration: none; color: inherit; }
+  .channel-switcher label { font-size: 0.875rem; color: #555; margin-right: 0.25rem; }
+  .channel-switcher select { min-width: 12rem; }
+  .operator-section { background: #f6f6f6; border: 1px solid #e0e0e0; border-radius: 6px; padding: 1rem; margin: 1rem 0; }
+  .operator-section h2 { margin: 0 0 0.75rem; font-size: 1rem; }
+  .operator-section input[type="text"], .operator-section input[type="password"] { padding: 0.375rem 0.5rem; font: inherit; }
+  .operator-section button { padding: 0.375rem 0.75rem; font: inherit; cursor: pointer; }
+  .operator-section .inline-form { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  .operator-section .shape-error { color: #b00020; font-size: 0.875rem; margin: 0.5rem 0 0; display: none; }
+  .operator-section .status { margin-top: 0.75rem; }
+  .operator-section .status strong { text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; }
+  .operator-section .ingest-error { color: #b00020; white-space: pre-wrap; }
+  .hero { text-align: center; padding: 3rem 1rem; }
+  .hero h2 { margin: 0 0 1rem; }
+  .channel h1 { margin-bottom: 0.25rem; }
+  .last-refreshed { color: #555; margin-top: 0; }
+  .catalog { list-style: none; padding: 0; }
+  .video-row { display: flex; gap: 1rem; margin-bottom: 1rem; }
+  .video-row .thumbnail img { display: block; }
+  .video-row .video-meta { display: flex; flex-direction: column; gap: 0.25rem; }
+  .video-title { font-weight: 600; }
+  .video-summary { margin: 0; color: #555; font-size: 0.875rem; }
+  .visitor-only, .operator-only { display: none; }
+`;
+
 /** Wrap page `body` in the shared document shell. */
-function page(title: string, body: unknown): string {
+function page(title: string, body: unknown, includeCatalogStyles = false): string {
+  const styles = includeCatalogStyles ? raw(CATALOG_STYLES) : '';
   return html`<!doctype html>
     <html lang="en">
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>${title}</title>
+        ${styles}
       </head>
       <body>
         ${body}
@@ -110,33 +152,286 @@ function catalogRow(video: CatalogVideo): Html {
   </li>`;
 }
 
-/**
- * Render the `/` catalog index.
- *
- * When `channel` is `null` (nothing ingested yet) an empty state is shown.
- */
-export function renderCatalog(channel: Channel | null, videos: CatalogVideo[]): string {
-  if (channel === null) {
-    return page(
-      'ytb-index',
-      html`<main>
-        <p class="empty">No videos ingested. Run pnpm ingest <channel> to populate.</p>
-      </main>`,
-    );
+/** Channel switcher dropdown for the site header. */
+function channelSwitcher(channels: Array<{ id: string; title: string }>, currentId?: string): Html {
+  if (channels.length === 0) {
+    return html`<nav class="channel-switcher">
+      <label for="channel-switcher">Channel</label>
+      <select id="channel-switcher" disabled>
+        <option>—</option>
+      </select>
+    </nav>`;
+  }
+  const options = channels.map((ch) =>
+    ch.id === currentId
+      ? html`<option value="${ch.id}" selected>${ch.title}</option>`
+      : html`<option value="${ch.id}">${ch.title}</option>`,
+  );
+  return html`<nav class="channel-switcher">
+    <label for="channel-switcher">Channel</label>
+    <select id="channel-switcher">
+      <option value="">—</option>
+      ${options}
+    </select>
+  </nav>`;
+}
+
+/** Render the current ingest status for an unlocked operator. */
+function statusBlock(status: IngestRequest | null): Html {
+  if (status === null) {
+    return html`<div class="status" id="ingest-status"><p>No ingest requests yet.</p></div>`;
+  }
+  const counts = `${status.videosWritten} videos / ${status.commentsWritten} comments`;
+  const when = relativeDate(status.updatedAt);
+  const errorBlock =
+    status.status === 'failed' && status.error
+      ? html`<p class="ingest-error">${status.error}</p>`
+      : '';
+  return html`<div class="status" id="ingest-status">
+    <p><strong>${status.status}</strong> · ${counts} · updated ${when}</p>
+    ${errorBlock}
+  </div>`;
+}
+
+/** The compact trigger form shown on a populated catalog page. */
+function compactTriggerForm(): Html {
+  return html`<form id="ingest-trigger-form" class="inline-form" aria-label="Trigger ingest">
+      <input
+        id="ingest-channel"
+        type="text"
+        name="channel"
+        placeholder="@handle, channel ID, or youtube.com URL"
+        required
+        size="40"
+      />
+      <button type="submit">Ingest</button>
+    </form>
+    <p id="ingest-shape-error" class="shape-error">
+      Enter a YouTube handle (@name), channel ID (UC…), or youtube.com channel URL.
+    </p>`;
+}
+
+/** The hero trigger form shown when no channels exist yet. */
+function heroTriggerForm(): Html {
+  return html`<div class="hero">
+    <h2>Paste a channel to ingest</h2>
+    ${compactTriggerForm()}
+  </div>`;
+}
+
+/** The locked operator gate and the unlocked operator chrome. */
+function operatorSection(isEmpty: boolean, status: IngestRequest | null): Html {
+  return html`<section class="operator-section" aria-label="Operator tools">
+    <div class="visitor-only" id="operator-locked">
+      <p>
+        <button id="operator-unlock-reveal" type="button">Unlock operator tools</button>
+      </p>
+      <div id="operator-token-form" style="display:none">
+        <p class="inline-form">
+          <input
+            id="operator-token"
+            type="password"
+            placeholder="Operator token"
+            autocomplete="off"
+            size="30"
+          />
+          <button id="operator-unlock" type="button">Save token</button>
+        </p>
+      </div>
+    </div>
+    <div class="operator-only" id="operator-unlocked">
+      ${
+        isEmpty
+          ? heroTriggerForm()
+          : html`<h2>Trigger ingest</h2>
+              ${compactTriggerForm()}`
+      }
+      ${statusBlock(status)}
+      <p><button id="operator-forget" type="button">Forget token</button></p>
+    </div>
+  </section>`;
+}
+
+/** The small inline script that gates operator chrome and polls status. */
+function operatorScript(): Html {
+  const script = `(function() {
+  var STORAGE_KEY = 'ytb_index_operator_token';
+  var locked = document.getElementById('operator-locked');
+  var unlocked = document.getElementById('operator-unlocked');
+  var tokenForm = document.getElementById('operator-token-form');
+  var revealBtn = document.getElementById('operator-unlock-reveal');
+  var unlockBtn = document.getElementById('operator-unlock');
+  var forgetBtn = document.getElementById('operator-forget');
+  var tokenInput = document.getElementById('operator-token');
+  var triggerForm = document.getElementById('ingest-trigger-form');
+  var channelInput = document.getElementById('ingest-channel');
+  var shapeError = document.getElementById('ingest-shape-error');
+  var channelSwitcher = document.getElementById('channel-switcher');
+  var pollTimer = null;
+
+  function hasToken() { return !!localStorage.getItem(STORAGE_KEY); }
+
+  function setOperatorVisible(show) {
+    if (locked) locked.style.display = show ? 'none' : '';
+    if (unlocked) unlocked.style.display = show ? '' : 'none';
   }
 
-  return page(
-    `${channel.title} — ytb-index`,
-    html`<header class="channel">
-        <h1>${channel.title}</h1>
-        <p class="last-refreshed">Last refreshed: ${channel.fetchedAt.slice(0, 10)}</p>
-      </header>
-      <main>
-        <ul class="catalog">
-          ${videos.map((video) => catalogRow(video))}
-        </ul>
-      </main>`,
-  );
+  function looksLikeChannel(v) {
+    v = (v || '').trim();
+    if (!v) return false;
+    if (/^https?:\\/\\/(www\\.)?youtube\\.com\\/(channel\\/|@|c\\/)/.test(v)) return true;
+    if (/^UC[A-Za-z0-9_-]{22}$/.test(v)) return true;
+    if (/^@?[A-Za-z0-9_-]{3,30}$/.test(v)) return true;
+    return false;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    });
+  }
+
+  function renderStatus(data) {
+    var area = document.getElementById('ingest-status');
+    if (!area) return;
+    if (!data) { area.innerHTML = '<p>No ingest requests yet.</p>'; return; }
+    var html = '<p><strong>' + escapeHtml(data.status) + '</strong> · ' +
+      (data.videosWritten || 0) + ' videos / ' + (data.commentsWritten || 0) + ' comments' +
+      ' · updated ' + new Date(data.updatedAt).toLocaleString() + '</p>';
+    if (data.status === 'failed' && data.error) {
+      html += '<p class="ingest-error">' + escapeHtml(data.error) + '</p>';
+    }
+    area.innerHTML = html;
+  }
+
+  async function pollStatus() {
+    try {
+      var res = await fetch('/api/ingest/status');
+      if (!res.ok) return;
+      var data = await res.json();
+      renderStatus(data);
+      if (data && (data.status === 'queued' || data.status === 'running')) {
+        pollTimer = setTimeout(pollStatus, 3000);
+      }
+    } catch (e) {}
+  }
+
+  function startPolling() {
+    if (pollTimer) clearTimeout(pollTimer);
+    pollStatus();
+  }
+
+  if (revealBtn && tokenForm) {
+    revealBtn.addEventListener('click', function() {
+      tokenForm.style.display = tokenForm.style.display === 'none' ? '' : 'none';
+      if (tokenInput) tokenInput.focus();
+    });
+  }
+
+  if (unlockBtn && tokenInput) {
+    unlockBtn.addEventListener('click', function() {
+      var value = tokenInput.value.trim();
+      if (value) {
+        localStorage.setItem(STORAGE_KEY, value);
+        setOperatorVisible(true);
+        startPolling();
+      }
+    });
+  }
+
+  if (forgetBtn) {
+    forgetBtn.addEventListener('click', function() {
+      localStorage.removeItem(STORAGE_KEY);
+      setOperatorVisible(false);
+      if (tokenInput) tokenInput.value = '';
+    });
+  }
+
+  if (triggerForm && channelInput) {
+    triggerForm.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      var value = channelInput.value.trim();
+      if (!looksLikeChannel(value)) {
+        if (shapeError) shapeError.style.display = '';
+        return;
+      }
+      if (shapeError) shapeError.style.display = 'none';
+      var token = localStorage.getItem(STORAGE_KEY);
+      if (!token) return;
+      try {
+        var res = await fetch('/api/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({ channel: value })
+        });
+        if (res.status === 401) { alert('Invalid operator token.'); return; }
+        if (res.status === 409) {
+          var body = await res.json().catch(function() { return {}; });
+          alert('An ingest is already running for this channel. Request: ' + (body.requestId || 'unknown'));
+          startPolling();
+          return;
+        }
+        if (!res.ok) { alert('Ingest request failed: ' + res.status); return; }
+        channelInput.value = '';
+        startPolling();
+      } catch (err) {
+        alert('Network error: ' + (err && err.message ? err.message : err));
+      }
+    });
+  }
+
+  if (channelSwitcher) {
+    channelSwitcher.addEventListener('change', function(e) {
+      var value = e.target.value;
+      if (value) window.location.href = '/c/' + encodeURIComponent(value);
+    });
+  }
+
+  setOperatorVisible(hasToken());
+  if (hasToken()) startPolling();
+})();`;
+  return html`<script>
+    ${raw(script)};
+  </script>`;
+}
+
+/**
+ * Render the `/` catalog index or `/c/:channelId` page.
+ *
+ * When `channel` is `null` (nothing ingested yet) an empty state is shown and
+ * the trigger input becomes the onboarding hero.
+ */
+export function renderCatalog(
+  channel: Channel | null,
+  videos: CatalogVideo[],
+  channels: Array<{ id: string; title: string }> = [],
+  status: IngestRequest | null = null,
+): string {
+  const title = channel?.title ?? 'ytb-index';
+  const currentChannelId = channel?.id;
+  const isEmpty = channel === null;
+
+  const body = html`<header class="site-header">
+      <div class="brand"><a href="/">ytb-index</a></div>
+      ${channelSwitcher(channels, currentChannelId)}
+    </header>
+    <main>
+      ${operatorSection(isEmpty, status)}
+      ${
+        isEmpty
+          ? html`<p class="visitor-only">No channels ingested yet.</p>`
+          : html`<header class="channel">
+                <h1>${channel.title}</h1>
+                <p class="last-refreshed">Last refreshed: ${channel.fetchedAt.slice(0, 10)}</p>
+              </header>
+              <ul class="catalog">
+                ${videos.map((video) => catalogRow(video))}
+              </ul>`
+      }
+    </main>
+    ${operatorScript()}`;
+
+  return page(title, body, true);
 }
 
 /**

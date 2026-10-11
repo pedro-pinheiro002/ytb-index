@@ -4,7 +4,7 @@ Ingest is an unbounded, sequential YouTube-Data-API paging run (wall-time in min
 
 ## Status
 
-accepted
+accepted — partially superseded by ADR-0005: the execution home and secret locations moved (FE-triggered runs now execute on GitHub Actions; ingest secrets are now encrypted GitHub repo secrets). The remote-write mechanics below are unchanged and still govern.
 
 ## Considered Options
 
@@ -14,7 +14,7 @@ accepted
 
 ## Consequences
 
-- One new local secret (D1 API token in `.env`, gitignored) next to `YOUTUBE_API_KEY`. Neither ever enters the repo or CI; the deploy pipeline only holds `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`.
+- One new local secret (D1 API token in `.env`, gitignored) next to `YOUTUBE_API_KEY`. Neither ever enters the repo or CI; the deploy pipeline only holds `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`. (Superseded by ADR-0005: both now live as encrypted GitHub repo secrets for the ingest workflow; the deploy pipeline is unchanged.)
 - Catalog freshness is manual. ADR-0001 makes staleness safe: past 30 days unrefreshed, comment text redacts to a placeholder at read time — the failure mode is degraded pages, not a ToS violation.
 - A local-file ingest mode stays available (the better-sqlite3 executor) for dev and tests; locally the run keeps its single all-or-nothing transaction.
 - Remotely, a failed chunk leaves earlier chunks' upserts in place — the documented repair is re-running the same command; transient failures (429/5xx/network) are retried in place with backoff before surfacing.

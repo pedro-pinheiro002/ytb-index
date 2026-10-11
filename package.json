@@ -16,7 +16,7 @@
     "deploy": "wrangler deploy",
     "ingest": "tsx src/cli/ingest.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test --test-reporter=spec src/**/*.test.ts",
+    "test": "tsx --test --test-reporter=spec \"src/**/*.test.ts\"",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

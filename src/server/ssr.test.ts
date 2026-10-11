@@ -9,7 +9,13 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
+import type {
+  Channel,
+  CommentRecord,
+  IngestRequest,
+  TimeAnchor,
+  VideoRecord,
+} from '../shared/types.ts';
 import { renderCatalog, renderVideo } from './ssr.tsx';
 
 const TODAY = new Date().toISOString();
@@ -70,7 +76,37 @@ function normalizeTags(html: string): string {
 describe('renderCatalog', () => {
   it('renders the empty state when there is no channel', () => {
     const out = renderCatalog(null, []);
-    assert.ok(out.includes('No videos ingested. Run pnpm ingest <channel> to populate.'));
+    assert.ok(out.includes('No channels ingested yet.'));
+    assert.ok(out.includes('Paste a channel to ingest'));
+  });
+
+  it('renders the channel switcher with all channels', () => {
+    const channels = [
+      { id: 'UC_other', title: 'Other Channel' },
+      { id: CHANNEL.id, title: CHANNEL.title },
+    ];
+    const out = renderCatalog(CHANNEL, [VIDEO], channels);
+    assert.ok(out.includes('Other Channel'));
+    assert.ok(out.includes('value="UC_test_channel" selected'));
+  });
+
+  it('renders the operator status when provided', () => {
+    const status: IngestRequest = {
+      id: 'req-1',
+      channelInput: '@test',
+      channelKey: '@test',
+      channelId: CHANNEL.id,
+      status: 'running',
+      videosWritten: 12,
+      commentsWritten: 340,
+      error: null,
+      createdAt: TODAY,
+      updatedAt: TODAY,
+      finishedAt: null,
+    };
+    const out = renderCatalog(CHANNEL, [VIDEO], [], status);
+    assert.ok(out.includes('running'));
+    assert.ok(out.includes('12 videos / 340 comments'));
   });
 
   it('renders a row with thumbnail, title link, relative date, and summary', () => {

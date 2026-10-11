@@ -7,10 +7,17 @@
  * persist everything. Default target is the local SQLite catalog (one atomic
  * `Executor.batch`); `--remote` sends the same statements to the production D1
  * database over the D1 HTTP API instead (chunked, best-effort — ADR-0003).
+ * `--report-status <requestId>` (remote-only) additionally advances the
+ * `ingest_requests` row through `running → done/failed` for the web app's
+ * status polling (ADR-0005). The reporter is built before the first validation
+ * step, so a failure anywhere — including a bad API key or channel input —
+ * marks the row `failed`; reporting is best-effort and never aborts the ingest
+ * itself.
  *
  * Sources of decisions:
  *  - `docs/spec/v1.md` §5 (ordered steps + error matrix + logging).
  *  - `.scratch/build-spec/issue.md` (module map, single seam, one transaction).
+ *  - `docs/adr/0005-fe-triggered-ingest-on-github-actions.md` (status row).
  *
  * Seams for tests:
  *  - `transport` — the same `(url, init?) => Promise<Response>` seam the
@@ -18,6 +25,7 @@
  *  - `quota` — inject a `QuotaCounter` (defaults to a fresh 9500-unit budget).
  *  - `writer` — inject a `D1RestWriter` for `--remote` (defaults to the
  *    env-configured HTTP writer).
+ *  - `statusWriter` — inject a `D1RestWriter` for `--report-status` updates.
  *  - `now` — override the clock so `fetched_at` values are deterministic.
  */
 import 'dotenv/config';
@@ -35,6 +43,7 @@ import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { createD1RestWriter, type D1RestWriter } from '../db/d1-http.ts';
 import { ingestStatements } from '../db/queries.ts';
+import { createIngestStatusReporter, type IngestStatusReporter } from './status.ts';
 import type {
   Channel,
   ChannelInput,
@@ -51,6 +60,12 @@ const REMOTE_ENV_VARS = [
   'CLOUDFLARE_ACCOUNT_ID',
   'D1_DATABASE_ID',
 ] as const;
+
+/** Names among {@link REMOTE_ENV_VARS} that are unset or empty. */
+function missingRemoteEnvVars(): string[] {
+  return REMOTE_ENV_VARS.filter((name) => (process.env[name] ?? '') === '');
+}
+
 const VIDEO_BATCH_SIZE = 50;
 const PLAYLIST_PAGE_SIZE = 50;
 const COMMENT_PAGE_SIZE = 100;
@@ -187,6 +202,16 @@ export async function runIngest(
     verbose?: boolean;
     /** Write to remote D1 over the HTTP API instead of the local catalog. */
     remote?: boolean;
+    /**
+     * `ingest_requests.id` to report pipeline status to. Requires `remote`
+     * (ADR-0005); reporting is best-effort and never aborts the ingest.
+     */
+    reportStatus?: string;
+    /**
+     * Injectable D1 writer for status updates — used by tests; falls back to
+     * `writer` when the D1 env vars are absent.
+     */
+    statusWriter?: D1RestWriter;
     dbPath?: string;
     /** Injectable transport — used by tests. Defaults to `globalThis.fetch`. */
     transport?: Transport;
@@ -212,13 +237,65 @@ export async function runIngest(
     process.stderr.write(`${message}\n`);
   };
 
+  // `--report-status` is remote-only: the local catalog has no
+  // `ingest_requests` table and no token to reach the hosted one.
+  if (args.reportStatus !== undefined && !remote) {
+    error('Error: --report-status requires --remote.');
+    return 1;
+  }
+  if (args.reportStatus === '') {
+    error('Error: --report-status requires a <requestId> value.');
+    return 1;
+  }
+
+  // Status reporting is best-effort and constructed BEFORE any validation
+  // step, so a pre-start failure (bad API key, bad channel input, …) can still
+  // mark the request `failed` (ADR-0005). The D1 credentials are independent
+  // of the YouTube API key. When neither an injected writer nor the D1 env
+  // vars are available we cannot reach D1: warn and let the run proceed
+  // (`--remote`'s own env check below still applies).
+  let statusReporter: IngestStatusReporter | undefined;
+  if (args.reportStatus !== undefined) {
+    const statusWriter = args.statusWriter ?? args.writer;
+    const missing = missingRemoteEnvVars();
+    if (statusWriter !== undefined || missing.length === 0) {
+      statusReporter = createIngestStatusReporter({
+        requestId: args.reportStatus,
+        writer:
+          statusWriter ??
+          createD1RestWriter({
+            accountId: process.env['CLOUDFLARE_ACCOUNT_ID'] ?? '',
+            databaseId: process.env['D1_DATABASE_ID'] ?? '',
+            token: process.env['CLOUDFLARE_API_TOKEN'] ?? '',
+          }),
+        now,
+      });
+    } else {
+      error(`[WARN] --report-status disabled: missing ${missing.join(', ')}.`);
+    }
+  }
+
+  /** Best-effort terminal `failed` report; returns the given exit code. */
+  async function fail(message: string, code: number): Promise<number> {
+    await statusReporter?.failed(message);
+    return code;
+  }
+
+  /** Print the spec error line, report `failed` best-effort, return the code. */
+  async function handleFailure(err: unknown): Promise<number> {
+    const code = reportIngestError(err);
+    await statusReporter?.failed(err instanceof Error ? err.message : String(err));
+    return code;
+  }
+
   // 1. Validate the API key — cheapest possible fail, before any I/O.
   log('[1/8] Validating API key...');
   const key = process.env[DEFAULT_API_KEY_ENV];
   const keyResult = validateApiKey(key);
   if (!keyResult.ok) {
-    error(API_KEY_FAILURE_MESSAGES[keyResult.reason]);
-    return 1;
+    const message = API_KEY_FAILURE_MESSAGES[keyResult.reason];
+    error(message);
+    return await fail(message, 1);
   }
   // `keyResult.ok` narrows `key` to a string only loosely; assert it here.
   const apiKey = key as string;
@@ -233,10 +310,11 @@ export async function runIngest(
     channelInput = parseChannelInput(args.channel);
   } catch (err) {
     if (err instanceof UsageError) {
-      error(`Error: ${err.message}`);
-      return 1;
+      const message = `Error: ${err.message}`;
+      error(message);
+      return await fail(message, 1);
     }
-    throw err;
+    return await handleFailure(err);
   }
 
   // 3. Prepare the write target: the local SQLite catalog by default, or the
@@ -245,10 +323,11 @@ export async function runIngest(
   let writer: D1RestWriter | undefined;
   if (remote) {
     log('[3/8] Configuring remote D1 write...');
-    const missing = REMOTE_ENV_VARS.filter((name) => (process.env[name] ?? '') === '');
+    const missing = missingRemoteEnvVars();
     if (missing.length > 0) {
-      error(`Error: --remote requires ${missing.join(', ')}. Check the values in .env.`);
-      return 1;
+      const message = `Error: --remote requires ${missing.join(', ')}. Check the values in .env.`;
+      error(message);
+      return await fail(message, 1);
     }
     writer =
       args.writer ??
@@ -259,7 +338,11 @@ export async function runIngest(
       });
   } else {
     log(`[3/8] Opening catalog database at ${dbPath}...`);
-    db = await openCatalog(dbPath);
+    try {
+      db = await openCatalog(dbPath);
+    } catch (err) {
+      return await handleFailure(err);
+    }
   }
 
   const client = createYouTubeClient({
@@ -308,6 +391,10 @@ export async function runIngest(
       uploadsPlaylistId: resource.contentDetails.relatedPlaylists.uploads,
       fetchedAt,
     };
+
+    // Instrumentation only (ADR-0005): the run is live and the channel id is
+    // resolved. Best-effort — a reporting failure never aborts the ingest.
+    await statusReporter?.running(channel.id);
 
     // 6. Page the uploads playlist, collecting video IDs (1 unit/page).
     log('[5/8] Fetching uploads playlist...');
@@ -426,6 +513,12 @@ export async function runIngest(
       await db.batch(statements);
     }
 
+    // Instrumentation only: final counts land with the terminal `done`
+    // update, batched into one writer call. Best-effort, never throws.
+    if (statusReporter !== undefined) {
+      await statusReporter.complete({ videos: videos.length, comments: comments.length });
+    }
+
     return {
       channels: 1,
       videos: videos.length,
@@ -449,10 +542,57 @@ export async function runIngest(
     );
     return 0;
   } catch (err) {
-    return reportIngestError(err);
+    return await handleFailure(err);
   } finally {
     db?.close();
   }
+}
+
+/** Parsed CLI arguments for the `pnpm ingest` shim. */
+export interface IngestCliArgs {
+  channel?: string;
+  verbose: boolean;
+  remote: boolean;
+  reportStatus?: string;
+  /** Set when the flags are invalid; the shim prints `Error: <error>` and exits 1. */
+  error?: string;
+}
+
+/**
+ * Parse `pnpm ingest` argv (without `node`/script). Flags may appear in any
+ * order; the first non-flag argument is the channel. `--report-status` takes
+ * its value either as the next argument or inline (`--report-status=<id>`).
+ */
+export function parseIngestArgs(argv: string[]): IngestCliArgs {
+  const parsed: IngestCliArgs = { verbose: false, remote: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === '--verbose') {
+      parsed.verbose = true;
+    } else if (arg === '--remote') {
+      parsed.remote = true;
+    } else if (arg === '--report-status' || arg.startsWith('--report-status=')) {
+      const inlineValue = arg.startsWith('--report-status=')
+        ? arg.slice('--report-status='.length)
+        : undefined;
+      const value = inlineValue ?? argv[index + 1];
+      if (
+        value === undefined ||
+        value === '' ||
+        (inlineValue === undefined && value.startsWith('--'))
+      ) {
+        return { ...parsed, error: '--report-status requires a <requestId> value.' };
+      }
+      parsed.reportStatus = value;
+      if (inlineValue === undefined) index += 1;
+    } else if (!arg.startsWith('--') && parsed.channel === undefined) {
+      parsed.channel = arg;
+    }
+  }
+  if (parsed.reportStatus !== undefined && !parsed.remote) {
+    return { ...parsed, error: '--report-status requires --remote.' };
+  }
+  return parsed;
 }
 
 // CLI shim — only runs when invoked directly (`tsx src/cli/ingest.ts`).
@@ -460,14 +600,16 @@ const isCli =
   import.meta.url === `file://${process.argv[1]}` ||
   process.argv[1]?.endsWith('ingest.ts') === true;
 if (isCli) {
-  const args = process.argv.slice(2);
-  const verbose = args.includes('--verbose');
-  const remote = args.includes('--remote');
-  const channel = args.find((a) => !a.startsWith('--'));
+  const parsed = parseIngestArgs(process.argv.slice(2));
+  if (parsed.error !== undefined) {
+    process.stderr.write(`Error: ${parsed.error}\n`);
+    process.exit(1);
+  }
   runIngest({
-    ...(channel !== undefined ? { channel } : {}),
-    verbose,
-    remote,
+    ...(parsed.channel !== undefined ? { channel: parsed.channel } : {}),
+    verbose: parsed.verbose,
+    remote: parsed.remote,
+    ...(parsed.reportStatus !== undefined ? { reportStatus: parsed.reportStatus } : {}),
   }).then(
     (code) => process.exit(code),
     (err: unknown) => {
