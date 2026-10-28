@@ -106,7 +106,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
     opencodeBaseUrl: (
       optional(env, 'OPENCODE_BASE_URL') ?? 'https://opencode.ai/inference/go/openai/v1'
     ).replace(/\/+$/, ''),
-    opencodeModel: optional(env, 'OPENCODE_MODEL') ?? 'deepseek-v4.1-flash',
+    opencodeModel: optional(env, 'OPENCODE_MODEL') ?? 'claude-haiku-5-5',
     ghToken: required(env, 'GH_TOKEN', missing),
     telegramBotToken: optional(env, 'TELEGRAM_BOT_TOKEN'),
     telegramChatId: optional(env, 'TELEGRAM_CHAT_ID'),

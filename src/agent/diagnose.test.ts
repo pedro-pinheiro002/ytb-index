@@ -47,7 +47,7 @@ const CONFIG: AgentConfig = {
   sentryUrl: 'https://sentry.example',
   opencodeApiKey: 'oc_sk_test',
   opencodeBaseUrl: 'https://opencode.example/v1',
-  opencodeModel: 'deepseek-v4.1-flash',
+  opencodeModel: 'claude-haiku-5-5',
   ghToken: 'ghp_test',
   telegramBotToken: 'bot-token',
   telegramChatId: '42',
