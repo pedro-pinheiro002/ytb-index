@@ -2,6 +2,8 @@
   "name": "ytb-index",
   "main": "src/worker.ts",
   "compatibility_date": "2025-09-01",
+  // Required by @sentry/cloudflare (ADR-0006).
+  "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [
     {
       "binding": "ytb_index",
@@ -17,5 +19,12 @@
   "vars": {
     "GH_OWNER": "pedro-pinheiro002",
     "GH_REPO": "ytb-index",
+    // Error reporting for the repair agent (ADR-0006). The DSN is public by
+    // design — it ships in the bundle — so the webhook does not trust the
+    // payload; SENTRY_HOOK_SECRET is what authenticates the dispatch.
+    //   wrangler secret put SENTRY_HOOK_SECRET   # Sentry Internal Integration's client secret
+    //   SENTRY_DSN: set once the Sentry project exists, then deploy.
+    //   AGENT_ENABLED="false" is the kill switch: /api/agent-hook answers 503.
+    "AGENT_ENABLED": "true",
   },
 }
