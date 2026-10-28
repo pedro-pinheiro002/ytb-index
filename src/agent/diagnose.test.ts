@@ -86,7 +86,14 @@ const EVENT: SentryEvent = {
   platform: 'javascript',
   tags: {},
   frames: [
-    { filename: 'src/worker.ts', fn: 'fetch', lineNo: 12, inApp: true, contextLine: undefined },
+    {
+      filename: 'src/worker.ts',
+      fn: 'fetch',
+      lineNo: 12,
+      colNo: undefined,
+      inApp: true,
+      contextLine: undefined,
+    },
   ],
 };
 

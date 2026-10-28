@@ -34,7 +34,7 @@ after(() => {
 
 /** Build a frame with the fields `collectContext` reads. */
 function frame(filename: string, lineNo?: number, inApp = true): SentryFrame {
-  return { filename, fn: 'boom', lineNo, inApp, contextLine: undefined };
+  return { filename, fn: 'boom', lineNo, colNo: undefined, inApp, contextLine: undefined };
 }
 
 describe('isSourcePath', () => {
