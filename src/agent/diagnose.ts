@@ -25,6 +25,7 @@ import {
   AgentConfigError,
   loadConfig,
   loadPayload,
+  optionalValue,
   type AgentConfig,
   type AgentPayload,
 } from './config.ts';
@@ -226,8 +227,11 @@ export async function diagnose(
 ): Promise<number> {
   const deps: DiagnoseDeps = { ...defaultDeps, ...overrides };
   const telegram: TelegramOptions = {
-    botToken: env.TELEGRAM_BOT_TOKEN,
-    chatId: env.TELEGRAM_CHAT_ID,
+    // Normalized here (not via `loadConfig`) because the config-failure path
+    // notifies before a config exists; `''` from an unset secret must not look
+    // like a configured bot.
+    botToken: optionalValue(env.TELEGRAM_BOT_TOKEN),
+    chatId: optionalValue(env.TELEGRAM_CHAT_ID),
   };
 
   let config: AgentConfig;
