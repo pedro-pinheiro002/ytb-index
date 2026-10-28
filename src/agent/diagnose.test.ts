@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import type { AgentConfig, AgentPayload } from './config.ts';
 import { AgentConfigError } from './config.ts';
 import { diagnose, failureMessage, prBody, type DiagnoseDeps } from './diagnose.ts';
+import type { TelegramOptions } from './notify.ts';
 import type { SentryEvent, SentryIssue } from './sentry.ts';
 
 /** A diff the allowlist accepts: one changed line in `src/`. */
@@ -353,5 +354,31 @@ describe('failureMessage', () => {
     assert.equal(message.includes('<script>'), false);
     assert.match(message, /&lt;script&gt;/);
     assert.match(message, /boom &lt;b&gt;/);
+  });
+});
+
+describe('diagnose — notification settings', () => {
+  it('treats blank Telegram settings as unset instead of calling the API', async () => {
+    let seen: TelegramOptions | undefined;
+    const { deps } = harness({
+      loadConfig: () => {
+        throw new AgentConfigError(['OPENCODE_API_KEY is missing']);
+      },
+      notify: async (options) => {
+        seen = options;
+        return true;
+      },
+    });
+
+    // Actions substitutes an unset secret with '' — that must not look like a
+    // configured bot, or every failure would hit `api.telegram.org/bot/sendMessage`.
+    const code = await diagnose(
+      { OPENCODE_API_KEY: '', TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '' },
+      deps,
+    );
+
+    assert.equal(code, 1);
+    assert.equal(seen?.botToken, undefined);
+    assert.equal(seen?.chatId, undefined);
   });
 });

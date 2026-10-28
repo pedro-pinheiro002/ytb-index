@@ -68,10 +68,20 @@ function required(env: NodeJS.ProcessEnv, name: string, missing: string[]): stri
   return value.trim();
 }
 
+/**
+ * Trim a raw value, mapping blank to `undefined`.
+ *
+ * Actions substitutes an unset secret with `''`, not with an absent variable,
+ * so `''` must mean "not configured" here — otherwise a Telegram call would be
+ * attempted against an empty bot token.
+ */
+export function optionalValue(value: string | undefined): string | undefined {
+  return value === undefined || value.trim() === '' ? undefined : value.trim();
+}
+
 /** Read an optional variable as `string | undefined` (never `''`). */
 function optional(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  const value = env[name];
-  return value === undefined || value.trim() === '' ? undefined : value.trim();
+  return optionalValue(env[name]);
 }
 
 /** Read a positive integer with a default; reject `NaN`/`0`/negatives. */
