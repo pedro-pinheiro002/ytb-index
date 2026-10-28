@@ -125,6 +125,7 @@ async function proposeAndVerify(
         baseUrl: config.opencodeBaseUrl,
         apiKey: config.opencodeApiKey,
         model: config.opencodeModel,
+        maxTokens: config.maxTokens,
         session: `agent-${incident.issue.shortId}`,
       });
     } catch (error) {

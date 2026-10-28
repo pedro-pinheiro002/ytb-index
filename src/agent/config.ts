@@ -46,6 +46,8 @@ export interface AgentConfig {
   maxDiffLines: number;
   /** Model attempts (first proposal + repairs). */
   maxAttempts: number;
+  /** Output budget per attempt; reasoning tokens count against it. */
+  maxTokens: number;
   /** Repository root (`GITHUB_WORKSPACE`). */
   repoRoot: string;
 }
@@ -110,6 +112,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
     telegramChatId: optional(env, 'TELEGRAM_CHAT_ID'),
     maxDiffLines: positiveInt(env, 'AGENT_MAX_DIFF_LINES', 200),
     maxAttempts: positiveInt(env, 'AGENT_MAX_ATTEMPTS', 2),
+    maxTokens: positiveInt(env, 'AGENT_MAX_TOKENS', 8000),
     repoRoot: optional(env, 'GITHUB_WORKSPACE') ?? process.cwd(),
   };
 
