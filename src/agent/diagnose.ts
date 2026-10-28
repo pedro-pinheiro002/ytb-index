@@ -122,6 +122,7 @@ async function proposeAndVerify(
       baseUrl: config.opencodeBaseUrl,
       apiKey: config.opencodeApiKey,
       model: config.opencodeModel,
+      session: `agent-${incident.issue.shortId}`,
     });
     deps.log(
       `[agent] attempt ${attempt}: ${completion.completionTokens} completion tokens (${config.opencodeModel})`,
