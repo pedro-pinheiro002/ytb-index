@@ -20,6 +20,12 @@ export interface OpenCodeOptions {
   transport?: (url: string, init: RequestInit) => Promise<Response>;
   /** Override the request timeout (ms). */
   timeoutMs?: number;
+  /**
+   * Value for `x-opencode-session`. OpenCode Go requires it to route the
+   * request; without the header every call fails 400 `MissingSessionID`.
+   * Stable per issue so retries land in the same routing lane.
+   */
+  session: string;
 }
 
 /** One completion's text and the usage counters (for the run log). */
@@ -49,6 +55,7 @@ export async function complete(
       authorization: `Bearer ${options.apiKey}`,
       'content-type': 'application/json',
       'user-agent': 'ytb-index-agent',
+      'x-opencode-session': options.session,
     },
     body: JSON.stringify({
       model: options.model,
