@@ -53,6 +53,7 @@ const CONFIG: AgentConfig = {
   telegramChatId: '42',
   maxDiffLines: 200,
   maxAttempts: 2,
+  maxTokens: 8000,
   repoRoot: '/repo',
 };
 

@@ -46,6 +46,9 @@ jobs:
 
       AGENT_MAX_DIFF_LINES: ${{ vars.AGENT_MAX_DIFF_LINES || '200' }}
       AGENT_MAX_ATTEMPTS: ${{ vars.AGENT_MAX_ATTEMPTS || '2' }}
+      # Reasoning tokens count against this budget: at 2 500 the model spent
+      # all of it thinking and returned an empty completion.
+      AGENT_MAX_TOKENS: ${{ vars.AGENT_MAX_TOKENS || '8000' }}
 
     steps:
       - uses: actions/checkout@v4
