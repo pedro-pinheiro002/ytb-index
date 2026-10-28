@@ -30,6 +30,7 @@ import {
   type AgentPayload,
 } from './config.ts';
 import { collectContext } from './context.ts';
+import { resolveFrames } from './sourcemap.ts';
 import {
   applyDiff,
   branchName,
@@ -272,12 +273,20 @@ export async function diagnose(
       config.sentryToken,
       payload.issueId,
     );
-    const files = deps.collectContext(config.repoRoot, event.frames);
+    // Cloudflare reports frames against the bundled `worker.js`; map them back
+    // to `src/**` or the model has no code to read (ADR-0006).
+    const frames = resolveFrames(config.repoRoot, event.frames);
+    const files = deps.collectContext(config.repoRoot, frames);
     deps.log(
-      `[agent] ${issue.shortId}: ${event.frames.length} frame(s), ${files.length} file excerpt(s)`,
+      `[agent] ${issue.shortId}: ${event.frames.length} frame(s), ` +
+        `${frames.length} resolved, ${files.length} file excerpt(s)`,
     );
 
-    const proposal = await proposeAndVerify(deps, config, { issue, event, files });
+    const proposal = await proposeAndVerify(deps, config, {
+      issue,
+      event: { ...event, frames },
+      files,
+    });
     if (!proposal.ok) {
       deps.error(`[agent] giving up: ${proposal.reason.slice(0, 800)}`);
       await deps.notify(telegram, failureMessage(payload, proposal.reason));

@@ -12,6 +12,7 @@ export interface SentryFrame {
   filename: string;
   fn: string;
   lineNo: number | undefined;
+  colNo: number | undefined;
   inApp: boolean;
   contextLine: string | undefined;
 }
@@ -153,10 +154,12 @@ function extractFrames(event: Json): SentryFrame[] {
         continue;
       }
       const lineNo = typeof frame.lineno === 'number' ? frame.lineno : undefined;
+      const colNo = typeof frame.colno === 'number' ? frame.colno : undefined;
       frames.push({
         filename,
         fn: str(frame.function) ?? '(anonymous)',
         lineNo,
+        colNo,
         inApp: frame.inApp === true,
         contextLine: str(frame.context_line),
       });
