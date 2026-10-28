@@ -1,0 +1,66 @@
+name: Agent diagnose
+
+# Woken by `repository_dispatch` (`event_type: agent-diagnose`) from the
+# Worker's `POST /api/agent-hook`, which is in turn called by a Sentry issue
+# webhook. The job only ever pushes `agent/fix-*` and opens a draft PR: it has
+# no Cloudflare credentials, so it cannot deploy.
+#
+# `repository_dispatch` always runs the workflow from the default branch and
+# never exposes secrets to forks, same trust model as `ingest.yml` (ADR-0005).
+
+on:
+  repository_dispatch:
+    types: [agent-diagnose]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One run per Sentry issue. A slow run is not cancelled by a webhook retry;
+# the branch-exists check inside the script is the real dedup.
+concurrency:
+  group: agent-${{ github.event.client_payload.issue.shortId }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    name: diagnose
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # The payload is passed as JSON, never interpolated into a shell line.
+      AGENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_URL: https://sentry.io
+
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'deepseek-v4.1-flash' }}
+
+      # A PAT is preferred over GITHUB_TOKEN: pushes made with GITHUB_TOKEN do
+      # not trigger workflows, so the PR would arrive without CI checks.
+      GH_TOKEN: ${{ secrets.AGENT_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      AGENT_MAX_DIFF_LINES: ${{ vars.AGENT_MAX_DIFF_LINES || '200' }}
+      AGENT_MAX_ATTEMPTS: ${{ vars.AGENT_MAX_ATTEMPTS || '2' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Same token as GH_TOKEN so `git push` and `gh` share credentials.
+          token: ${{ secrets.AGENT_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Diagnose and open draft PR
+        run: pnpm exec tsx src/agent/diagnose.ts

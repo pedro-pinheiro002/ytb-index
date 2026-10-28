@@ -12,6 +12,7 @@
  */
 import { Hono } from 'hono';
 import type { Executor } from '../db/executor.ts';
+import { agentHookRoute, type AgentHookConfig } from './api/agent-hook.ts';
 import { ingestApiRoute, type IngestApiConfig } from './api/ingest.ts';
 import { catalogRoute } from './routes/catalog.ts';
 import { videoRoute } from './routes/video.ts';
@@ -25,6 +26,11 @@ export interface CreateAppOptions {
    * `POST /api/ingest` then fails closed (401) while the status read stays up.
    */
   ingest?: IngestApiConfig | undefined;
+  /**
+   * Repair-agent webhook config. Omitted in read-only contexts (tests, Node
+   * dev without a secret): `POST /api/agent-hook` then fails closed (503).
+   */
+  agentHook?: AgentHookConfig | undefined;
 }
 
 /**
@@ -33,10 +39,11 @@ export interface CreateAppOptions {
  * Passing a pre-opened executor lets the Node server, the Worker, and
  * integration tests share the exact same routes over different drivers.
  */
-export async function createApp({ db, ingest }: CreateAppOptions): Promise<Hono> {
+export async function createApp({ db, ingest, agentHook }: CreateAppOptions): Promise<Hono> {
   const app = new Hono();
   catalogRoute(app, db);
   videoRoute(app, db);
   ingestApiRoute(app, db, ingest ?? {});
+  agentHookRoute(app, agentHook ?? {});
   return app;
 }
