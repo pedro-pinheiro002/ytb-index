@@ -23,8 +23,9 @@
     // design — it ships in the bundle — so the webhook does not trust the
     // payload; SENTRY_HOOK_SECRET is what authenticates the dispatch.
     //   wrangler secret put SENTRY_HOOK_SECRET   # Sentry Internal Integration's client secret
-    //   SENTRY_DSN: set once the Sentry project exists, then deploy.
     //   AGENT_ENABLED="false" is the kill switch: /api/agent-hook answers 503.
+    // Project 4512335906078720, org 4512335884976128 (US region).
+    "SENTRY_DSN": "https://a91ef9065059015f47c655a000e1ae1f@o4512335884976128.ingest.us.sentry.io/4512335906078720",
     "AGENT_ENABLED": "true",
   },
 }
