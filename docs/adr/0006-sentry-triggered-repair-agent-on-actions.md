@@ -1,0 +1,28 @@
+# Sentry-triggered repair agent on GitHub Actions; the model gets a checkout and a draft PR, never a deploy credential
+
+A Sentry issue becomes a reviewed branch without a server: the Worker is wrapped in `Sentry.withSentry`, Sentry's Internal Integration posts `issue.created` to `POST /api/agent-hook` on the same Worker, that route verifies an HMAC-SHA256 signature, filters for a new unresolved error, and fires a second `repository_dispatch` (`agent-diagnose`) alongside ADR-0005's ingest one; a public-repo Actions runner then fetches the issue and its latest event from the Sentry API, reads the source around the in-app frames, asks OpenCode Go for a unified diff, and only accepts a diff confined to `src/**/*.ts(x)` that survives `pnpm typecheck && pnpm test` — twice at most, the second round fed with the verifier output. Success pushes `agent/fix-<short-id>` and opens a **draft** PR; failure notifies Telegram and exits non-zero. The pipeline reuses ADR-0005's event → dispatch → Actions shape because the project still has no server, and because the runner is the only place that already has a checkout, Node, pnpm, and the repository's own verifier; the model's blast radius ends at a branch that a human must merge, since `ci.yml` keeps `wrangler deploy` on `push: main`.
+
+## Status
+
+accepted
+
+## Considered Options
+
+- **VPS + self-hosted GlitchTip + a persistent FastAPI orchestrator** — the first design (`archive/PLANO_VPS_v2.md`): Caddy, Docker, Postgres, a webhook server, and a container that clones and tests. Rejected: it buys a second runtime, backup duty, and patch duty for a project whose only runtime is a Worker, and its orchestrator still had to reproduce the same verifier. It returns only if error retention must be self-hosted, dedup must be durable, or the agent must run outside Actions.
+- **Cloudflare Queues or a Durable Object alarm loop** — rejected: no working tree, no `git`, no pnpm, so the verifier would have to be reinvented (or trusted); Actions already provides the exact environment `ci.yml` uses.
+- **Cron in Actions polling the Sentry API** — rejected: 5-minute granularity, minutes burned while idle, and it needs durable state to know what is new — the problem `issue.created` already solves for free.
+- **Sentry's managed AI suggestions/Seer** — rejected for v1: the suggestion is produced and reviewed inside Sentry, outside our `src/` allowlist and outside the repository's tests, so there is no artifact we can gate with CI.
+- **Sentry webhook → Worker route → `repository_dispatch` → Actions (chosen)** — one route on infrastructure that already exists, HMAC instead of a shared path secret, and the model's output lands as a branch, never as a deploy.
+
+## Consequences
+
+- **Trust boundary.** The DSN ships in the bundle and is public by design, so anyone can create issues in the project; therefore no payload is trusted and a request without a valid `Sentry-Hook-Signature` (HMAC-SHA256 of the raw body, `timingSafeEqual`) never dispatches. The route fails closed when the secret, PAT, or coordinates are absent, and answers `503` when `AGENT_ENABLED=false`.
+- **Dedup.** The authoritative check is `git ls-remote --heads origin agent/fix-<short-id>` in the job. The Worker's 10-minute in-memory debounce is burst containment only — isolates are ephemeral and there are several of them — plus a `concurrency` group per short id so two jobs never race the same branch.
+- **A second PAT, `AGENT_PUSH_TOKEN`.** Pushes made with `GITHUB_TOKEN` do not trigger workflows, so a PR opened with it would arrive without `ci.yml` and without the checks that make the diff reviewable. The job checks out with that token; the scope is Contents: write plus Pull requests: write, and nothing else.
+- **No deploy credential in the job.** `CLOUDFLARE_API_TOKEN`, `YOUTUBE_API_KEY`, and `OPERATOR_TOKEN` stay out of `agent-diagnose.yml`. The worst outcome of a hijacked run is a draft PR plus tokens spent; production is untouched until a human merges.
+- **Allowlist in both directions.** `context.ts` reads only `src/**/*.ts(x)` and resolves paths inside the workspace, so a hostile stack frame cannot exfiltrate `.env` or a lockfile; `patch.ts` rejects creation, deletion, rename, binary patches, `..`, hunk-less diffs, and anything above `AGENT_MAX_DIFF_LINES` (200), so the model cannot touch `.github/`, `package.json`, the lockfile, `wrangler.jsonc`, or `migrations/`.
+- **Verification is the same verifier.** `pnpm typecheck && pnpm test` — the same commands `ci.yml` runs — decide whether a proposal is even proposed. A failed round is fed back to the model once; a second failure ends the run rather than publishing something half-working.
+- **Prompt injection is bounded, not eliminated.** Issue titles, messages, and frames are attacker-influenced text. The defences are the allowlist, the verifier, and the draft-PR gate; the agent's own code (`src/agent/**`, `.github/workflows/**`) is ordinary reviewed code.
+- **Cost.** Sentry's 5k events/month is the binding quota (no tracing: `tracesSampleRate: 0`); Actions is free on a public repo; OpenCode Go is per token, bounded by `max_tokens`, two attempts, and a 200-line diff cap. Repeated occurrences of one issue cost nothing extra because they do not create new issues.
+- **Relationship to ADR-0005.** Same mechanism, second event type: both dispatch from the Worker with Worker-held PATs, and both run on the default branch. Ingest and diagnose stay separate workflows with separate secrets, so an unavailable agent means no PR — never a failed ingest.
+- **ADR-0001's public-reads stance is unchanged.** The route returns only `202`/`4xx` with a small JSON body; it exposes no issue content and is not linked from the app.
