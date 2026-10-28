@@ -45,6 +45,16 @@ export interface SentryIssue {
 /** Loose shapes for the JSON we consume; every field is re-checked on read. */
 type Json = Record<string, unknown>;
 
+/** Read a number from either the API (camelCase) or the ingest (snake_case) shape. */
+function num(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 /** Narrow an unknown to an object. */
 function isObject(value: unknown): value is Json {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -149,19 +159,20 @@ function extractFrames(event: Json): SentryFrame[] {
       if (!isObject(frame)) {
         continue;
       }
-      const filename = str(frame.filename) ?? str(frame.absPath) ?? '';
+      const filename = str(frame.filename) ?? str(frame.absPath) ?? str(frame.abs_path) ?? '';
       if (filename === '') {
         continue;
       }
-      const lineNo = typeof frame.lineno === 'number' ? frame.lineno : undefined;
-      const colNo = typeof frame.colno === 'number' ? frame.colno : undefined;
+      // `/events/latest/` answers in camelCase; the ingest payload uses
+      // snake_case. Reading only one of them silently dropped every line
+      // number, which is why early runs had no source context at all.
       frames.push({
         filename,
         fn: str(frame.function) ?? '(anonymous)',
-        lineNo,
-        colNo,
-        inApp: frame.inApp === true,
-        contextLine: str(frame.context_line),
+        lineNo: num(frame.lineNo, frame.lineno),
+        colNo: num(frame.colNo, frame.colno),
+        inApp: frame.inApp === true || frame.in_app === true,
+        contextLine: str(frame.contextLine) ?? str(frame.context_line),
       });
     }
   }
