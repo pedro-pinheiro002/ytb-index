@@ -59,6 +59,9 @@ function getApp(env: Env): Promise<Hono> {
       enabled: env.AGENT_ENABLED !== 'false',
     },
   });
+  appPromise.catch(() => {
+    appPromise = undefined;
+  });
   return appPromise;
 }
 
