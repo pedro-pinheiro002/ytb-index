@@ -37,7 +37,7 @@ export interface OpenCodeResult {
 
 /** Shape of the subset of the response body we read. */
 interface ChatCompletion {
-  choices?: Array<{ message?: { content?: unknown } }>;
+  choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>;
   usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
 }
 
@@ -74,7 +74,14 @@ export async function complete(
   const parsed = (await response.json()) as ChatCompletion;
   const content = parsed.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || content.trim() === '') {
-    throw new Error('opencode returned an empty completion');
+    // Reasoning models can spend the whole `max_tokens` budget thinking and
+    // return an empty `content`; say so instead of failing opaquely.
+    const reason = parsed.choices?.[0]?.finish_reason;
+    const used = parsed.usage?.completion_tokens;
+    throw new Error(
+      `opencode returned an empty completion (finish_reason=${String(reason)}, ` +
+        `completion_tokens=${String(used)})`,
+    );
   }
 
   return {

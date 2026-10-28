@@ -389,3 +389,36 @@ describe('diagnose — notification settings', () => {
     assert.equal(seen?.chatId, undefined);
   });
 });
+
+describe('diagnose — model transport failures', () => {
+  it('spends the next attempt instead of aborting the issue', async () => {
+    let calls = 0;
+    const { deps, state } = harness({
+      complete: async () => {
+        calls += 1;
+        if (calls === 1) {
+          // What a reasoning model returns when it thinks through the whole
+          // `max_tokens` budget: HTTP 200 with an empty `content`.
+          throw new Error('opencode returned an empty completion (finish_reason=length)');
+        }
+        return { content: `\`\`\`diff\n${goodDiff()}\`\`\``, promptTokens: 1, completionTokens: 1 };
+      },
+    });
+
+    assert.equal(await diagnose({}, deps), 0);
+    assert.equal(calls, 2);
+    assert.equal(state.prs.length, 1);
+  });
+
+  it('gives up cleanly when every attempt fails in transport', async () => {
+    const { deps, state } = harness({
+      complete: async () => {
+        throw new Error('opencode 429: rate limited');
+      },
+    });
+
+    assert.equal(await diagnose({}, deps), 1);
+    assert.equal(state.prs.length, 0);
+    assert.match(state.notifications.at(-1) ?? '', /rate limited/);
+  });
+});

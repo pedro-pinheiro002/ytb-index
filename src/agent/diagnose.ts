@@ -42,7 +42,7 @@ import {
   run,
 } from './git.ts';
 import { escapeHtml, notify, type TelegramOptions } from './notify.ts';
-import { complete } from './opencode.ts';
+import { complete, type OpenCodeResult } from './opencode.ts';
 import { extractDiff, summarizeDiff, validateDiff } from './patch.ts';
 import { buildMessages, buildRepairMessages, type ChatMessage, type Incident } from './prompt.ts';
 import { fetchIssue, fetchLatestEvent, type SentryEvent, type SentryIssue } from './sentry.ts';
@@ -119,12 +119,21 @@ async function proposeAndVerify(
   let lastReason = 'no attempt was made';
 
   for (let attempt = 1; attempt <= config.maxAttempts; attempt += 1) {
-    const completion = await deps.complete(messages, {
-      baseUrl: config.opencodeBaseUrl,
-      apiKey: config.opencodeApiKey,
-      model: config.opencodeModel,
-      session: `agent-${incident.issue.shortId}`,
-    });
+    let completion: OpenCodeResult;
+    try {
+      completion = await deps.complete(messages, {
+        baseUrl: config.opencodeBaseUrl,
+        apiKey: config.opencodeApiKey,
+        model: config.opencodeModel,
+        session: `agent-${incident.issue.shortId}`,
+      });
+    } catch (error) {
+      // A 429, a timeout, or a completion that spent its whole budget on
+      // reasoning must not lose the issue: burn the next attempt instead.
+      lastReason = `model call failed: ${error instanceof Error ? error.message : String(error)}`;
+      deps.log(`[agent] attempt ${attempt}: ${lastReason}`);
+      continue;
+    }
     deps.log(
       `[agent] attempt ${attempt}: ${completion.completionTokens} completion tokens (${config.opencodeModel})`,
     );
