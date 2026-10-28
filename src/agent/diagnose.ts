@@ -275,11 +275,11 @@ export async function diagnose(
     );
     // Cloudflare reports frames against the bundled `worker.js`; map them back
     // to `src/**` or the model has no code to read (ADR-0006).
-    const frames = resolveFrames(config.repoRoot, event.frames);
+    const frames = resolveFrames(config.repoRoot, event.frames, { log: deps.log });
     const files = deps.collectContext(config.repoRoot, frames);
     deps.log(
       `[agent] ${issue.shortId}: ${event.frames.length} frame(s), ` +
-        `${frames.length} resolved, ${files.length} file excerpt(s)`,
+        `${frames.length} kept, ${files.length} file excerpt(s)`,
     );
 
     const proposal = await proposeAndVerify(deps, config, {

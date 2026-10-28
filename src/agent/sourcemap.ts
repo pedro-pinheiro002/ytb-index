@@ -34,19 +34,24 @@ export function isBundledFrame(frame: SentryFrame): boolean {
  * Rebuild the Worker locally and return its source map, or `null` when the
  * build fails or emits no map. Never throws.
  */
-export function buildSourceMap(repoRoot: string): TraceMap | null {
+export function buildSourceMap(
+  repoRoot: string,
+  log: (message: string) => void = () => {},
+): TraceMap | null {
   const outdir = join(repoRoot, BUNDLE_DIR);
   const result = run('pnpm', ['exec', 'wrangler', 'deploy', '--dry-run', '--outdir', outdir], {
     cwd: repoRoot,
     timeoutMs: 180_000,
   });
   if (!result.ok) {
+    log(`[agent] source map: wrangler exited ${result.status}: ${result.output.slice(0, 300)}`);
     return null;
   }
   try {
     const raw = readFileSync(join(outdir, `${BUNDLE_FILE}.map`), 'utf8');
     return new TraceMap(JSON.parse(raw) as ConstructorParameters<typeof TraceMap>[0]);
-  } catch {
+  } catch (error) {
+    log(`[agent] source map: ${(error as Error).message.slice(0, 300)}`);
     return null;
   }
 }
@@ -61,6 +66,7 @@ function toRepoPath(repoRoot: string, source: string): string | undefined {
 /** Injectable seam so tests can supply a map without running a build. */
 export interface ResolveOptions {
   loadMap?: (repoRoot: string) => TraceMap | null;
+  log?: (message: string) => void;
 }
 
 /**
@@ -78,8 +84,10 @@ export function resolveFrames(
   if (!frames.some(isBundledFrame)) {
     return frames;
   }
-  const map = (options.loadMap ?? buildSourceMap)(repoRoot);
+  const log = options.log ?? (() => {});
+  const map = options.loadMap ? options.loadMap(repoRoot) : buildSourceMap(repoRoot, log);
   if (map === null) {
+    log('[agent] source map: unavailable, keeping bundled frames');
     return frames;
   }
 
