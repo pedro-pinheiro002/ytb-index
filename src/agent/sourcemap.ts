@@ -58,8 +58,15 @@ export function buildSourceMap(
 
 /** Turn a map source (absolute or relative to the repo) into `src/...`, or `undefined`. */
 function toRepoPath(repoRoot: string, source: string): string | undefined {
-  const absolute = isAbsolute(source) ? source : join(repoRoot, source);
-  const path = relative(repoRoot, absolute).split('\\').join('/');
+  const cleaned = source.split('\\').join('/');
+  const absolute = isAbsolute(cleaned) ? cleaned : join(repoRoot, cleaned);
+  let path = relative(repoRoot, absolute).split('\\').join('/');
+  if (path.startsWith('../')) {
+    // Some bundlers emit `sources` relative to the map, others relative to a
+    // temporary dir; keep the tail that starts at `src/`.
+    const at = `/${path}`.lastIndexOf('/src/');
+    path = at === -1 ? path : `src/${path.slice(at + 5)}`;
+  }
   return isSourcePath(path) ? path : undefined;
 }
 
@@ -92,6 +99,7 @@ export function resolveFrames(
   }
 
   const resolved: SentryFrame[] = [];
+  const mapped: string[] = [];
   for (const frame of frames) {
     if (!isBundledFrame(frame)) {
       resolved.push(frame);
@@ -107,6 +115,7 @@ export function resolveFrames(
     if (position.source === null || position.line === null) {
       continue;
     }
+    mapped.push(`${position.source}:${position.line}`);
     const source = toRepoPath(repoRoot, position.source);
     if (source === undefined) {
       continue;
@@ -121,5 +130,13 @@ export function resolveFrames(
     });
   }
 
-  return resolved.length > 0 ? resolved : frames;
+  if (resolved.length === 0) {
+    log(
+      `[agent] source map: nothing mapped into src ` +
+        `(frames: ${frames.map((f) => `${f.filename}:${f.lineNo ?? '?'}`).join(', ')}; ` +
+        `sources: ${mapped.slice(0, 3).join(', ') || 'none'})`,
+    );
+    return frames;
+  }
+  return resolved;
 }
