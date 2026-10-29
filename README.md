@@ -4,7 +4,7 @@ A TypeScript + Hono service that turns one YouTube channel into a browseable, ti
 
 One channel per run · one-shot fetch · server-rendered HTML · SQLite in a single file · no client-side framework.
 
-See [`docs/spec/v1.md`](docs/spec/v1.md) for the full v1 specification and [`GLOSSARY.md`](GLOSSARY.md) for canonical vocabulary.
+See [`docs/spec/v1.md`](docs/spec/v1.md) for the v1 specification, [`docs/spec/v2.md`](docs/spec/v2.md) for what v2 adds, and [`GLOSSARY.md`](GLOSSARY.md) for canonical vocabulary.
 
 ## What you get
 
@@ -12,6 +12,14 @@ See [`docs/spec/v1.md`](docs/spec/v1.md) for the full v1 specification and [`GLO
 - **Static web catalog** (`pnpm dev` / `pnpm start`) — two SSR routes (`/`, `/v/:videoId`) over the SQLite file. The server never calls the YouTube API.
 - **Click-to-jump anchors** — every `TimeAnchor` (matched `h:mm:ss` and sentinel-anchored `mm:ss`) renders as `https://www.youtube.com/watch?v={id}&t={s}s` in a new tab.
 - **TTL redaction** — comment bodies past 30 days from `fetched_at` are replaced at read time with `[Comment text expired — refresh to recover]`; anchor links survive. See [ADR-0001](docs/adr/0001-ttl-policy.md).
+
+## What's new in v2
+
+- **Search** — `/search` finds comments, Replies, live chat and videos in the Catalog by terms, date range, author (display name or `UC…` id) and record kind, with sorting and pagination. Every SearchHit links to the video page in the app and to YouTube at the right second. Accents and case are folded, so `joao` finds "João" ([ADR-0010](docs/adr/0010-catalog-search-normalized-like-not-fts5.md)).
+- **Broadcasts** — live streams and premieres are stored as Broadcasts, with their real start and end times and a badge on the video page. Upcoming Broadcasts are skipped until they start.
+- **Replies** — Replies are ingested with their top-level comment, get TimeAnchor detection, and are shown nested under it. Each comment's `authorChannelId` is stored too.
+- **Live chat** — opt-in capture of the chat of any Broadcast that is on air during the Ingest, shown in a "Live chat" panel on its video page ([ADR-0009](docs/adr/0009-live-chat-official-api-active-broadcasts-only.md)).
+- **OperatorKey** — the Operator can pay for an Ingest with their own YouTube Data API key, checked in the web app and sealed to the runner ([ADR-0007](docs/adr/0007-operator-supplies-own-api-key.md), [ADR-0008](docs/adr/0008-sealed-operator-key-to-actions-runner.md)).
 
 ## Prerequisites
 
@@ -37,11 +45,25 @@ pnpm ingest @mkbhd                  # by handle
 pnpm ingest UCBks01f-a....          # by channel ID
 pnpm ingest https://www.youtube.com/@mkbhd
 pnpm ingest --verbose @mkbhd        # extra logging
+pnpm ingest @mkbhd --live-chat      # also capture on-air Broadcasts' chat (below)
 ```
 
 Accepted inputs (`src/yt/parse-channel.ts`): `@handle`, bare `handle`, `UC…` channel ID, or any canonical YouTube URL pointing at either.
 
 Locally, the run commits in a single transaction. Anything that fails mid-run leaves the previous catalog untouched.
+
+The summary line counts top-level comments (`comments=`) and Replies (`replies=`) apart; `skipped=` counts upcoming Broadcasts plus videos whose comments are disabled or not found, and `chat=` the LiveChatMessages written.
+
+### Capture live chat
+
+With `--live-chat` (or `INGEST_CAPTURE_LIVE_CHAT=true`, which the ingest workflow sets from the operator panel's "Capture live chat" checkbox), the Ingest also records the chat of every Broadcast that is **on air while it runs** ([ADR-0009](docs/adr/0009-live-chat-official-api-active-broadcasts-only.md)). So trigger it while the stream is live. The chat of a Broadcast that has already ended cannot be replayed: only the official API is used, and it serves chat only while the Broadcast is on air.
+
+```bash
+pnpm ingest @mkbhd --live-chat                          # default 3000-unit chat budget
+pnpm ingest @mkbhd --live-chat --live-chat-budget 1000  # spend at most 1000 units on chat
+```
+
+After the main write, the CLI polls the chat at the interval YouTube asks for and writes each poll at once, so a run cut short keeps what it captured. Each poll costs about 5 quota units (a 2 h stream at a 5 s interval would be ~7 200 units, hence the 3 000-unit default). Capture stops at the first of: the Broadcast going offline, the chat ending, the chat budget, or a 5 h wall-clock cap (under the 6 h Actions job limit). Only text messages and Super Chat comments are stored; each one's offset from the Broadcast's real start links to that second on YouTube.
 
 ### Remote ingest (D1)
 
@@ -69,7 +91,26 @@ Defaults to `./catalog.sqlite` (override with `DB_PATH=...`) and port `3000` (ov
 Then open:
 
 - `http://localhost:3000/` — catalog index (one row per video: thumbnail, title, published date, `N comments / K timestamped`).
-- `http://localhost:3000/v/<videoId>` — video detail page; all top-level comments newest-first, with timestamped comments accented and a `Timestamps:` footer listing every detected offset as a clickable link.
+- `http://localhost:3000/v/<videoId>` — video detail page; comments newest-first with their Replies nested under them, timestamped comments accented with a `Timestamps:` footer listing every detected offset as a clickable link. A Broadcast also gets its badge, real start time and duration, and a "Live chat" panel.
+- `http://localhost:3000/search` — search the Catalog (below).
+
+### Search the Catalog
+
+`/search` is a plain GET form, so every search is a bookmarkable URL. It reads the Catalog only, never YouTube. The full contract is in [spec v2, "SearchQuery contract"](docs/spec/v2.md#searchquery-contract-get-search); in short:
+
+| Param | Meaning |
+| --- | --- |
+| `q` | Terms, all must match; accents, case and punctuation are ignored. Up to 8 terms of 2+ characters. |
+| `kind` | Repeatable: `comment`, `reply`, `chat`, `video`. Default: `comment`, `reply`, `chat`. |
+| `channel` | A `UC…` id; default every Channel. |
+| `from`, `to` | `YYYY-MM-DD`, inclusive, on when the comment or message was written (UTC). |
+| `videoFrom`, `videoTo` | `YYYY-MM-DD`, inclusive, on the video's publish date. |
+| `author` | A `UC…` id matches that channel exactly; anything else matches part of the display name (`jose` finds "José"). |
+| `timestamped` | `1`: only comments with TimeAnchors, plus all live chat. |
+| `sort` | `newest` (default), `oldest`, `likes`. |
+| `page` | 25 hits per page, up to page 40. |
+
+Each SearchHit links to `/v/<videoId>#c-<commentId>` (or `#m-<messageId>` for chat) and to YouTube: at the first TimeAnchor (`&t=83s`), at a chat message's offset, or, for a comment without anchors, with `&lc=<commentId>`. Invalid params show an inline message with HTTP 400. Expired comments and chat never match.
 
 ### Run the Worker locally
 
@@ -93,6 +134,34 @@ pnpm exec wrangler secret put GH_DISPATCH_PAT   # fine-grained PAT, Contents: wr
 
 `GH_OWNER` / `GH_REPO` are plain `vars` in `wrangler.jsonc` (public info). Locally, `pnpm dev` reads the same names from `.env` — see [`.env.example`](.env.example).
 
+### Pay with your own key (OperatorKey)
+
+The operator panel can send your own YouTube Data API key (the OperatorKey) with a trigger, so the Ingest spends your Google Cloud project's quota instead of the repo's `YOUTUBE_API_KEY` ([ADR-0007](docs/adr/0007-operator-supplies-own-api-key.md)). The flow:
+
+1. **Paste and check.** "Check key" calls `POST /api/key/check` (operator token required, so nobody can use the site to test keys). After a local shape check it makes one 1-unit `channels.list` call and shows a verdict with its own message:
+
+   | Verdict | What it tells you |
+   | --- | --- |
+   | `ok` | The key works; the panel remembers it in this browser until you forget it. |
+   | `invalid` | Google rejected the key: copy it again, whole. |
+   | `quotaExceeded` | The key's quota is used up for today; it resets at midnight Pacific Time. |
+   | `apiNotEnabled` | Enable the YouTube Data API v3 in the key's Google Cloud project. |
+   | `restricted` | HTTP referrer, IP or API restrictions block server use: relax them or use another key. |
+   | `unavailable` | YouTube could not be reached: try again. |
+
+2. **Trigger.** The Worker checks the key again (a failed check answers `422` and creates no IngestRequest), seals it with RSA-OAEP-256 under `INGEST_SEAL_PUBLIC_KEY` and dispatches only the ciphertext. The Actions runner unseals it with `INGEST_SEAL_PRIVATE_KEY` and masks it in the logs ([ADR-0008](docs/adr/0008-sealed-operator-key-to-actions-runner.md)). The key is never stored in D1, logged, or dispatched in clear.
+3. **Fallback.** A trigger without a key uses the repo secret `YOUTUBE_API_KEY`, as in v1. Locally, `pnpm ingest` uses `YOUTUBE_API_KEY` from `.env` unless `INGEST_SEALED_KEY` is set.
+
+Generate the sealing key pair once (rotate by repeating both steps):
+
+```bash
+pnpm exec tsx scripts/gen-seal-keypair.ts
+# 1. public JWK  -> wrangler.jsonc vars.INGEST_SEAL_PUBLIC_KEY, then deploy
+# 2. private JWK -> gh secret set INGEST_SEAL_PRIVATE_KEY
+```
+
+While `INGEST_SEAL_PUBLIC_KEY` is empty, triggers that carry a key answer `503` (fail closed); triggers without one keep using `YOUTUBE_API_KEY`.
+
 ## Configuration
 
 | Env var | Required by | Notes |
@@ -102,6 +171,10 @@ pnpm exec wrangler secret put GH_DISPATCH_PAT   # fine-grained PAT, Contents: wr
 | `OPERATOR_TOKEN` | `POST /api/ingest` | Bearer token for the operator API. Worker secret in production; `.env` for `pnpm dev`. |
 | `GH_DISPATCH_PAT` | `POST /api/ingest` | Fine-grained PAT (Contents: write) for `repository_dispatch`. Worker secret; `.env` for `pnpm dev`. |
 | `GH_OWNER` / `GH_REPO` | `POST /api/ingest` | GitHub coordinates for the dispatch. Wrangler `vars` (public info); `.env` for `pnpm dev`. |
+| `INGEST_SEAL_PUBLIC_KEY` | `POST /api/ingest` with a key | Public RSA-OAEP-256 JWK the OperatorKey is sealed under. Wrangler `var`; empty disables OperatorKey triggers (503). |
+| `INGEST_SEALED_KEY` | `pnpm ingest` | Sealed OperatorKey (`v1.…`); when set, it replaces `YOUTUBE_API_KEY`. Set by the ingest workflow from the dispatch payload. |
+| `INGEST_SEAL_PRIVATE_KEY` | `pnpm ingest` with a sealed key | Private RSA-OAEP-256 JWK that opens `INGEST_SEALED_KEY`. Repo secret in Actions; required whenever `INGEST_SEALED_KEY` is set. |
+| `INGEST_CAPTURE_LIVE_CHAT` | `pnpm ingest` | `true` turns on live-chat capture, like `--live-chat`. Set by the ingest workflow from the operator panel's checkbox. |
 
 Validation happens at step 1 of the ingest pipeline, before CLI parsing, before the DB is opened. A bad key never burns quota. See [spec §8](docs/spec/v1.md#8-api-key-management).
 
@@ -110,10 +183,10 @@ Validation happens at step 1 of the ingest pipeline, before CLI parsing, before 
 ```
 src/
 ├── worker.ts # Cloudflare Worker entry (server app over the D1 binding)
-├── server/   # Hono app, SSR routes (/, /v/:videoId), operator + agent-hook APIs
+├── server/   # Hono app, SSR routes (/, /v/:videoId, /search), operator + agent-hook APIs
 ├── yt/       # YouTube Data API v3 client + TimeAnchor detection + API-key validation
-├── db/       # Executor interface, portable queries, SQLite / D1 / D1 HTTP drivers
-├── ingest/   # Ingest pipeline steps: YouTube responses → Catalog rows
+├── db/       # Executor, Catalog reads + search, Ingest writes, SQLite / D1 / D1 HTTP drivers
+├── ingest/   # Ingest stages (incl. live chat): YouTube responses → Catalog rows
 ├── cli/      # Ingest entrypoint (src/cli/ingest.ts): env, quota, writes, exit codes
 ├── agent/    # Sentry-triggered repair agent (ADR-0006), isolated from the rest
 └── shared/   # Cross-cutting types (Channel, VideoRecord, CommentRecord, TimeAnchor)
@@ -121,7 +194,7 @@ src/
 
 Dependency arrows: `worker → server → db → shared`, `cli → ingest → yt → shared`, `cli → db → shared`. `shared/` is the leaf. These boundaries are enforced by [`src/architecture.test.ts`](src/architecture.test.ts).
 
-The authoritative artifact for the SQLite schema is [`migrations/0001_init.sql`](migrations/0001_init.sql).
+The authoritative artifact for the SQLite schema is [`migrations/`](migrations/), applied in order (`0003_v2_catalog.sql` adds the v2 columns, `live_chat_messages` and the search indexes).
 
 ## Scripts
 
@@ -152,17 +225,20 @@ Ingest seams for tests:
 
 - `transport` — `(url, init?) => Promise<Response>`. Default `globalThis.fetch`.
 - `quota` — a `QuotaCounter` (default 9500-unit budget; spec warns at 8000, aborts at 9500).
-- `now` — clock override for deterministic `fetchedAt`.
+- `now` — clock override for deterministic `fetchedAt` (and the live-chat wall-clock cap).
+- `sleep` — the wait between live-chat polls; tests pass one that advances `now`.
 
-## Limitations (v1)
+[`src/e2e.test.ts`](src/e2e.test.ts) runs a fixture Ingest with `--live-chat` into SQLite and then searches it through the app, end to end.
 
-These are deliberate v1 cuts — see [spec §3](docs/spec/v1.md#3-scope) and the [Out of scope](https://github.com/pedro-pinheiro002/ytb-index/issues/1) tracker ticket:
+## Limitations
+
+These are deliberate cuts — see [spec v1 §3](docs/spec/v1.md#3-scope), [spec v2 "Out of Scope"](docs/spec/v2.md#out-of-scope) and the [Out of scope](https://github.com/pedro-pinheiro002/ytb-index/issues/1) tracker ticket:
 
 - **One channel per run.** Re-running overwrites the SQLite file.
-- **Top-level comments only.** Replies are skipped at the API level.
-- **No pagination.** All videos render on one page.
-- **No search / filter / sort** on the catalog.
-- **No auth, no OAuth.** Personal-use single-operator app.
+- **No pagination on the catalog index.** All videos render on one page (search results are paged).
+- **Live chat only while on air.** No replay of ended Broadcasts, no unofficial endpoints; only text and Super Chat comments are kept.
+- **Search is substring matching.** Terms are ANDed; no relevance ranking, stemming or phrase search (no FTS5).
+- **No OAuth, one Operator.** The operator token gates writes; the OperatorKey is a plain API key.
 - **YouTube embeds and in-page seek are not used.** Every jump opens YouTube in a new tab.
 
 ## Tech stack

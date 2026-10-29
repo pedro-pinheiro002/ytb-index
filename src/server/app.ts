@@ -14,7 +14,9 @@ import { Hono } from 'hono';
 import type { Executor } from '../db/executor.ts';
 import { agentHookRoute, type AgentHookConfig } from './api/agent-hook.ts';
 import { ingestApiRoute, type IngestApiConfig } from './api/ingest.ts';
+import { keyCheckRoute } from './api/key-check.ts';
 import { catalogRoute } from './routes/catalog.ts';
+import { searchRoute } from './routes/search.ts';
 import { videoRoute } from './routes/video.ts';
 
 /** Options for {@link createApp}. */
@@ -24,6 +26,8 @@ export interface CreateAppOptions {
   /**
    * Operator ingest API config (ADR-0005). Omitted in read-only contexts:
    * `POST /api/ingest` then fails closed (401) while the status read stays up.
+   * Its `operatorToken` and `keyCheckTransport` also gate and drive
+   * `POST /api/key/check` (ADR-0007, F6 #51).
    */
   ingest?: IngestApiConfig | undefined;
   /**
@@ -43,7 +47,12 @@ export async function createApp({ db, ingest, agentHook }: CreateAppOptions): Pr
   const app = new Hono();
   catalogRoute(app, db);
   videoRoute(app, db);
+  searchRoute(app, db);
   ingestApiRoute(app, db, ingest ?? {});
+  keyCheckRoute(app, {
+    operatorToken: ingest?.operatorToken,
+    keyCheckTransport: ingest?.keyCheckTransport,
+  });
   agentHookRoute(app, agentHook ?? {});
   return app;
 }

@@ -19,6 +19,13 @@ export interface AppEnv {
   GH_OWNER?: string | undefined;
   /** GitHub repository name for `repository_dispatch` (plain var). */
   GH_REPO?: string | undefined;
+  /**
+   * Public RSA-OAEP JWK the OperatorKey is sealed under (plain var, ADR-0008,
+   * F6 #51). Either JSON text or, when `wrangler.jsonc` holds it as a JSON
+   * object var, the parsed object. Empty: a trigger carrying an OperatorKey
+   * fails closed (503).
+   */
+  INGEST_SEAL_PUBLIC_KEY?: string | object | undefined;
   /** Sentry Internal Integration client secret (secret). */
   SENTRY_HOOK_SECRET?: string | undefined;
   /** Kill switch for the repair agent; `"false"` disables the webhook (var). */
@@ -31,6 +38,11 @@ export interface AppConfig {
   agentHook: AgentHookConfig;
 }
 
+/** A JWK var as JSON text, whether Wrangler handed it over as a string or an object. */
+function jwkText(value: string | object | undefined): string | undefined {
+  return value === undefined || typeof value === 'string' ? value : JSON.stringify(value);
+}
+
 /** Build the ingest API and agent-hook config from `env`. Missing values fail closed. */
 export function appConfigFromEnv(env: AppEnv): AppConfig {
   return {
@@ -39,6 +51,7 @@ export function appConfigFromEnv(env: AppEnv): AppConfig {
       dispatchPat: env.GH_DISPATCH_PAT,
       ghOwner: env.GH_OWNER,
       ghRepo: env.GH_REPO,
+      sealPublicKey: jwkText(env.INGEST_SEAL_PUBLIC_KEY),
     },
     agentHook: {
       hookSecret: env.SENTRY_HOOK_SECRET,

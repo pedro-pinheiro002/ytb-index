@@ -20,9 +20,11 @@ import type { VideoRecord } from '../shared/types.ts';
 import {
   apiErrorReason,
   ChannelNotFoundError,
+  classifyVideo,
   collectIngestRows,
   enrichVideos,
   fetchComments,
+  fetchReplies,
   isQuotaExceeded,
   listUploadIds,
   resolveChannel,
@@ -68,6 +70,8 @@ function client(overrides: Partial<YouTubeClient>): YouTubeClient {
     listPlaylistItems: unexpected,
     listVideos: unexpected,
     listCommentThreads: unexpected,
+    listComments: unexpected,
+    listLiveChatMessages: unexpected,
     ...overrides,
   };
 }
@@ -154,14 +158,115 @@ describe('enrichVideos', () => {
       },
     });
     const ids = Array.from({ length: 120 }, (_, index) => `v${index}`);
-    const videos = await enrichVideos(ctx, ids, 'UC1');
+    const { videos, skippedVideoIds } = await enrichVideos(ctx, ids, 'UC1');
     assert.deepEqual(batches, [50, 50, 20]);
     assert.equal(videos.length, 120);
     assert.equal(videos[0]?.channelId, 'UC1');
+    assert.deepEqual(skippedVideoIds, []);
+  });
+
+  it('leaves upcoming Broadcasts out and logs each skip', async () => {
+    const { ctx, logs } = context({
+      listVideos: async () => ({
+        items: [
+          video('v1'),
+          {
+            ...video('soon'),
+            liveStreamingDetails: { scheduledStartTime: FETCHED_AT },
+          },
+        ],
+      }),
+    });
+    const { videos, skippedVideoIds } = await enrichVideos(ctx, ['v1', 'soon'], 'UC1');
+    assert.deepEqual(
+      videos.map((record) => record.id),
+      ['v1'],
+    );
+    assert.deepEqual(skippedVideoIds, ['soon']);
+    assert.deepEqual(logs, ['[skip] soon: upcoming Broadcast']);
+  });
+});
+
+describe('classifyVideo', () => {
+  const broadcast = (
+    details: NonNullable<VideoResource['liveStreamingDetails']>,
+    liveBroadcastContent?: 'none' | 'live' | 'upcoming',
+  ): VideoResource => {
+    const base = video('b1');
+    return {
+      ...base,
+      snippet: {
+        ...base.snippet,
+        ...(liveBroadcastContent !== undefined ? { liveBroadcastContent } : {}),
+      },
+      liveStreamingDetails: details,
+    };
+  };
+
+  it('is an upload without liveStreamingDetails', () => {
+    assert.deepEqual(classifyVideo(video('v1')), { kind: 'upload' });
+  });
+
+  it('is an ended Broadcast once actualEndTime is set', () => {
+    assert.deepEqual(
+      classifyVideo(broadcast({ actualStartTime: 'a', actualEndTime: 'b' }, 'none')),
+      { kind: 'broadcast', state: 'ended' },
+    );
+  });
+
+  it('is a live Broadcast on air, by liveBroadcastContent or a start without end', () => {
+    assert.deepEqual(classifyVideo(broadcast({ actualStartTime: 'a' }, 'live')), {
+      kind: 'broadcast',
+      state: 'live',
+    });
+    assert.deepEqual(classifyVideo(broadcast({ actualStartTime: 'a' })), {
+      kind: 'broadcast',
+      state: 'live',
+    });
+  });
+
+  it('is an upcoming Broadcast before it starts', () => {
+    assert.deepEqual(classifyVideo(broadcast({ scheduledStartTime: 's' }, 'upcoming')), {
+      kind: 'broadcast',
+      state: 'upcoming',
+    });
+    assert.deepEqual(classifyVideo(broadcast({ scheduledStartTime: 's' }, 'none')), {
+      kind: 'broadcast',
+      state: 'upcoming',
+    });
   });
 });
 
 describe('toVideoRecord', () => {
+  it('maps an on-air Broadcast with its start time and search_text', () => {
+    const base = video('b1');
+    const record = toVideoRecord(
+      {
+        ...base,
+        snippet: {
+          ...base.snippet,
+          title: 'Ao Vivo: Ação',
+          description: 'Já!',
+          liveBroadcastContent: 'live',
+        },
+        liveStreamingDetails: { actualStartTime: '2026-10-29T10:00:00Z' },
+      },
+      'UC1',
+      FETCHED_AT,
+    );
+    assert.equal(record.kind, 'broadcast');
+    assert.equal(record.broadcastState, 'live');
+    assert.equal(record.actualStartTime, '2026-10-29T10:00:00Z');
+    assert.equal(record.actualEndTime, null);
+    assert.equal(record.searchText, 'ao vivo acao ja');
+  });
+
+  it('refuses an upcoming Broadcast', () => {
+    assert.throws(() =>
+      toVideoRecord({ ...video('s1'), liveStreamingDetails: {} }, 'UC1', FETCHED_AT),
+    );
+  });
+
   it('picks the best thumbnail and coerces counts', () => {
     const record = toVideoRecord(
       video('v1', { default: { url: 'd' }, high: { url: 'h' } }),
@@ -172,6 +277,8 @@ describe('toVideoRecord', () => {
     assert.equal(record.viewCount, 10);
     assert.equal(record.likeCount, 0);
     assert.equal(record.commentCount, 0);
+    assert.equal(record.kind, 'upload');
+    assert.equal(record.broadcastState, null);
   });
 
   it('falls back to the hqdefault URL without thumbnails', () => {
@@ -204,6 +311,32 @@ describe('fetchComments', () => {
     assert.deepEqual(logs, ['[skip] v2: commentsDisabled', '[skip] v3: videoNotFound']);
   });
 
+  it('follows each top-level comment with its embedded Replies', async () => {
+    const reply = thread('r1', 'reply').snippet.topLevelComment;
+    const { ctx, calls } = context({
+      listCommentThreads: async () => ({
+        items: [
+          {
+            ...thread('c1', 'a'),
+            snippet: { ...thread('c1', 'a').snippet, totalReplyCount: 1 },
+            replies: { comments: [reply] },
+          },
+          thread('c2', 'b'),
+        ],
+      }),
+    });
+    const raw = await fetchComments(ctx, [{ id: 'v1' }] as VideoRecord[]);
+    assert.deepEqual(
+      raw.map((entry) => [entry.comment.id, entry.parentId]),
+      [
+        ['c1', undefined],
+        ['r1', 'c1'],
+        ['c2', undefined],
+      ],
+    );
+    assert.deepEqual(calls, ['commentThreads.list video=v1']);
+  });
+
   it('rethrows any other API error', async () => {
     const { ctx } = context({
       listCommentThreads: async () => {
@@ -217,6 +350,46 @@ describe('fetchComments', () => {
     const { ctx, logs } = context({ listCommentThreads: async () => ({ items: [] }) }, true);
     await fetchComments(ctx, [{ id: 'v1' }] as VideoRecord[]);
     assert.match(logs[0] ?? '', /^\[video\] v1 comments=0 \(\d+ms\)$/);
+  });
+});
+
+describe('fetchReplies', () => {
+  const reply = (id: string) => thread(id, id).snippet.topLevelComment;
+
+  it('uses the embedded Replies at no cost when they are all there', async () => {
+    const { ctx, calls } = context({});
+    const embedded = [reply('r1')];
+    const result = await fetchReplies(ctx, {
+      ...thread('c1', 'x'),
+      snippet: { ...thread('c1', 'x').snippet, totalReplyCount: 1 },
+      replies: { comments: embedded },
+    });
+    assert.deepEqual(result, embedded);
+    assert.deepEqual(calls, []);
+  });
+
+  it('pages comments.list by parentId when YouTube embeds fewer than totalReplyCount', async () => {
+    const seen: Array<{ parentId: string; pageToken?: string }> = [];
+    const { ctx, calls } = context({
+      listComments: async (params) => {
+        seen.push(params);
+        return params.pageToken === undefined
+          ? { items: [reply('r1'), reply('r2')], nextPageToken: 'p2' }
+          : { items: [reply('r3')] };
+      },
+    });
+    const result = await fetchReplies(ctx, {
+      ...thread('c1', 'x'),
+      snippet: { ...thread('c1', 'x').snippet, totalReplyCount: 3 },
+      replies: { comments: [reply('r1')] },
+    });
+    assert.deepEqual(
+      result.map((comment) => comment.id),
+      ['r1', 'r2', 'r3'],
+    );
+    assert.deepEqual(calls, ['comments.list parent=c1', 'comments.list parent=c1']);
+    assert.equal(seen[0]?.parentId, 'c1');
+    assert.equal(seen[1]?.pageToken, 'p2');
   });
 });
 
@@ -237,6 +410,28 @@ describe('toCommentRows', () => {
     assert.deepEqual(anchors, [
       { commentId: 'c1', seconds: 3723, rawText: '1:02:03', charPosition: 4 },
     ]);
+    assert.deepEqual(
+      comments.map((comment) => [comment.authorChannelId, comment.parentId, comment.searchText]),
+      [
+        ['', null, 'see 1 02 03'],
+        ['', null, 'no time here'],
+      ],
+    );
+  });
+
+  it('maps a Reply with its parentId, authorChannelId and TimeAnchors', () => {
+    const comment = thread('r1', 'Olá at 0:42').snippet.topLevelComment;
+    comment.snippet.authorChannelId = { value: 'UC_author' };
+    const { comments, anchors } = toCommentRows(
+      [{ videoId: 'v1', comment, parentId: 'c1' }],
+      'UC1',
+      FETCHED_AT,
+    );
+    assert.equal(comments[0]?.parentId, 'c1');
+    assert.equal(comments[0]?.authorChannelId, 'UC_author');
+    assert.equal(comments[0]?.searchText, 'ola at 0 42');
+    assert.equal(comments[0]?.hasAnchors, 1);
+    assert.deepEqual(anchors, [{ commentId: 'r1', seconds: 42, rawText: '0:42', charPosition: 7 }]);
   });
 });
 

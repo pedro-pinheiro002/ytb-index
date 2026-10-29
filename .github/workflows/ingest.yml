@@ -34,10 +34,28 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # ADR-0008 (F6 #51): when the Operator supplied their own key, the Worker
+      # sealed it (RSA-OAEP-256) and only the ciphertext is in the payload.
+      # Register the unsealed key as a log mask before the CLI reads it. The
+      # CLI never prints the key; this is defense in depth. The step never
+      # fails the job: an unseal error surfaces in "Run ingest", which reports
+      # it through --report-status. With no sealed key it does nothing.
+      - name: Mask OperatorKey
+        env:
+          INGEST_SEALED_KEY: ${{ github.event.client_payload.sealedKey }}
+          INGEST_SEAL_PRIVATE_KEY: ${{ secrets.INGEST_SEAL_PRIVATE_KEY }}
+        run: pnpm exec tsx src/cli/unseal-mask.ts
       - name: Run ingest
         env:
           # Passed via env, never interpolated into the shell line, so payload
           # values cannot inject commands.
           INGEST_CHANNEL: ${{ github.event.client_payload.channel }}
           INGEST_REQUEST_ID: ${{ github.event.client_payload.requestId }}
+          # Sealed OperatorKey (empty when the repo YOUTUBE_API_KEY pays). The
+          # CLI unseals it with the private JWK and uses it instead (ADR-0008).
+          INGEST_SEALED_KEY: ${{ github.event.client_payload.sealedKey }}
+          INGEST_SEAL_PRIVATE_KEY: ${{ secrets.INGEST_SEAL_PRIVATE_KEY }}
+          # Live-chat opt-in (ADR-0009): the CLI captures on-air Broadcasts'
+          # chat when this is "true" (same as --live-chat).
+          INGEST_CAPTURE_LIVE_CHAT: ${{ github.event.client_payload.captureLiveChat }}
         run: pnpm ingest "$INGEST_CHANNEL" --remote --report-status "$INGEST_REQUEST_ID"

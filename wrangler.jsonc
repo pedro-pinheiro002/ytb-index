@@ -30,5 +30,12 @@
     // Project 4512335906078720, org 4512335884976128 (US region).
     "SENTRY_DSN": "https://a91ef9065059015f47c655a000e1ae1f@o4512335884976128.ingest.us.sentry.io/4512335906078720",
     "AGENT_ENABLED": "true",
+    // OperatorKey sealing (ADR-0008, F6 #51): the PUBLIC RSA-OAEP-256 JWK from
+    // `pnpm exec tsx scripts/gen-seal-keypair.ts`, pasted as the JSON object
+    // value (a JSON string also works).
+    // Public by design; the private half is the INGEST_SEAL_PRIVATE_KEY repo
+    // secret. Empty = OperatorKey triggers are disabled and fail closed (503);
+    // triggers without a key still run on the repo YOUTUBE_API_KEY.
+    "INGEST_SEAL_PUBLIC_KEY": "",
   },
 }

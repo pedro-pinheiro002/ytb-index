@@ -4,7 +4,7 @@ Ingest is an unbounded, sequential YouTube-Data-API paging run (wall-time in min
 
 ## Status
 
-accepted — partially superseded by ADR-0005: the execution home and secret locations moved (FE-triggered runs now execute on GitHub Actions; ingest secrets are now encrypted GitHub repo secrets). The remote-write mechanics below are unchanged and still govern.
+accepted — partially superseded by ADR-0005: the execution home and secret locations moved (FE-triggered runs now execute on GitHub Actions; ingest secrets are now encrypted GitHub repo secrets). The remote-write mechanics below are unchanged and still govern. Amended by ADR-0007: "the server never touches the YouTube key" now has one exception, the transient OperatorKey check.
 
 ## Considered Options
 

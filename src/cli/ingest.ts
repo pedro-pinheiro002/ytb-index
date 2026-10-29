@@ -4,9 +4,10 @@
  * One-shot run: validate the API key, parse the channel argument, collect
  * the Catalog rows through the Ingest pipeline (`../ingest/pipeline.ts`:
  * resolve the channel, page its uploads, enrich videos, fetch top-level
- * comments, detect `TimeAnchor`s), and persist everything. This file owns the
- * CLI concerns: env, quota and call logging, the write target, status
- * reporting, and exit codes. Default target is the local SQLite catalog (one atomic
+ * comments, detect `TimeAnchor`s), and persist everything. Since R1 (#45)
+ * the pipeline runs as stages into a buffering row sink
+ * (`../ingest/stages.ts`). This file owns the CLI concerns: env, quota and
+ * call logging, the write target, status reporting, and exit codes. Default target is the local SQLite catalog (one atomic
  * `Executor.batch`); `--remote` sends the same statements to the production D1
  * database over the D1 HTTP API instead (chunked, best-effort — ADR-0003).
  * `--report-status <requestId>` (remote-only) additionally advances the
@@ -20,6 +21,8 @@
  *  - `docs/spec/v1.md` §5 (ordered steps + error matrix + logging).
  *  - build spec #12 (module map, single seam, one transaction).
  *  - `docs/adr/0005-fe-triggered-ingest-on-github-actions.md` (status row).
+ *  - `docs/adr/0008-sealed-operator-key-to-actions-runner.md` (F6 #51: a
+ *    sealed OperatorKey in `INGEST_SEALED_KEY` replaces `YOUTUBE_API_KEY`).
  *
  * Seams for tests:
  *  - `transport` — the same `(url, init?) => Promise<Response>` seam the
@@ -29,6 +32,21 @@
  *    env-configured HTTP writer).
  *  - `statusWriter` — inject a `D1RestWriter` for `--report-status` updates.
  *  - `now` — override the clock so `fetched_at` values are deterministic.
+ *
+ * F3a (#49): the summary line and the `done` report also carry Replies,
+ * skipped upcoming Broadcasts and quota used; `comments=` /
+ * `comments_written` count top-level CommentRecords only.
+ *
+ * F3b (#52, ADR-0009): `--live-chat` (or `INGEST_CAPTURE_LIVE_CHAT=true`,
+ * set by the workflow) captures the LiveChatMessages of on-air Broadcasts
+ * after the main write, within `--live-chat-budget <units>` (default 3000).
+ * The live-chat stage emits into a flushing sink: each poll's messages are
+ * written at once (one local `db.batch`, or one remote `writer.apply`), so a
+ * run cut off by quota or a crash keeps what it captured. Polls bill
+ * `QUOTA_COST.listLiveChatMessages` units; `sleep` is the polling seam and
+ * `now` also drives the wall-clock cap. The summary line ends in `chat=N`,
+ * `done` reports `chat_messages_written`, and `skipped=` / `skipped_videos`
+ * also count videos skipped for `commentsDisabled` / `videoNotFound`.
  */
 import 'dotenv/config';
 import { API_KEY_FAILURE_MESSAGES, validateApiKey } from '../yt/api-key.ts';
@@ -38,18 +56,20 @@ import type { Transport } from '../yt/client.ts';
 import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { createD1RestWriter, type D1RestWriter } from '../db/d1-http.ts';
-import { ingestStatements } from '../db/queries.ts';
+import { ingestStatements, liveChatMessageStatements } from '../db/ingest-writes.ts';
+import { ChannelNotFoundError, defaultIngestStages, isQuotaExceeded } from '../ingest/pipeline.ts';
 import {
-  ChannelNotFoundError,
-  collectIngestRows,
-  isQuotaExceeded,
+  createBufferingSink,
+  runIngestStages,
   type PipelineContext,
-} from '../ingest/pipeline.ts';
+  type RowSink,
+} from '../ingest/stages.ts';
+import { createLiveChatStage, DEFAULT_LIVE_CHAT_BUDGET_UNITS } from '../ingest/live-chat.ts';
 import { createIngestStatusReporter, type IngestStatusReporter } from './status.ts';
+import { resolveIngestApiKey } from './unseal.ts';
 import type { ChannelInput } from '../shared/types.ts';
 
 const DEFAULT_DB_PATH = './catalog.sqlite';
-const DEFAULT_API_KEY_ENV = 'YOUTUBE_API_KEY';
 /** Environment variables required by `--remote` (D1 HTTP API, ADR-0003). */
 const REMOTE_ENV_VARS = [
   'CLOUDFLARE_API_TOKEN',
@@ -71,8 +91,14 @@ const QUOTA_WARN = '[WARN] quota ~8000/10000 units used';
 interface IngestSummary {
   channels: number;
   videos: number;
+  /** Top-level CommentRecords (F3a, #49: Replies are counted apart). */
   comments: number;
+  replies: number;
   anchors: number;
+  /** Upcoming Broadcasts left out, plus videos whose comments were skipped. */
+  skippedVideos: number;
+  /** LiveChatMessages written (F3b, #52). */
+  chatMessages: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +158,15 @@ export async function runIngest(
     writer?: D1RestWriter;
     /** Override NOW (ms) — used by tests for deterministic `fetchedAt`. */
     now?: () => Date;
+    /**
+     * Capture the live chat of on-air Broadcasts (ADR-0009). Also on when
+     * `INGEST_CAPTURE_LIVE_CHAT` is `true`.
+     */
+    liveChat?: boolean;
+    /** Quota units live-chat polls may spend; defaults to 3000. */
+    liveChatBudget?: number;
+    /** Wait between live-chat polls — injected by tests. Defaults to `setTimeout`. */
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<number> {
   const startTimeMs = Date.now();
@@ -140,6 +175,12 @@ export async function runIngest(
   const dbPath = args.dbPath ?? DEFAULT_DB_PATH;
   const now = args.now ?? ((): Date => new Date());
   const quota = args.quota ?? new QuotaCounter();
+  const liveChat = args.liveChat === true || process.env['INGEST_CAPTURE_LIVE_CHAT'] === 'true';
+  const sleep =
+    args.sleep ??
+    ((ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)));
+  /** LiveChatMessages written so far; `undefined` until capture starts. */
+  let chatMessagesWritten: number | undefined;
 
   const log = (message: string): void => {
     process.stdout.write(`${message}\n`);
@@ -195,13 +236,23 @@ export async function runIngest(
   /** Print the spec error line, report `failed` best-effort, return the code. */
   async function handleFailure(err: unknown): Promise<number> {
     const code = reportIngestError(err);
-    await statusReporter?.failed(err instanceof Error ? err.message : String(err));
+    await statusReporter?.failed(err instanceof Error ? err.message : String(err), {
+      quotaUsed: quota.total,
+      ...(chatMessagesWritten !== undefined ? { chatMessages: chatMessagesWritten } : {}),
+    });
     return code;
   }
 
   // 1. Validate the API key — cheapest possible fail, before any I/O.
   log('[1/8] Validating API key...');
-  const key = process.env[DEFAULT_API_KEY_ENV];
+  // F6 (#51, ADR-0008): a sealed OperatorKey from the dispatch, when present,
+  // replaces the repo `YOUTUBE_API_KEY`. Never logged.
+  const resolvedKey = await resolveIngestApiKey(process.env);
+  if (!resolvedKey.ok) {
+    error(resolvedKey.message);
+    return await fail(resolvedKey.message, 1);
+  }
+  const key = resolvedKey.key;
   const keyResult = validateApiKey(key);
   if (!keyResult.ok) {
     const message = API_KEY_FAILURE_MESSAGES[keyResult.reason];
@@ -263,11 +314,11 @@ export async function runIngest(
 
   let warnedQuota = false;
 
-  /** Run one client call, log it under `--verbose`, and bill one quota unit. */
-  async function tracked<T>(label: string, call: () => Promise<T>): Promise<T> {
+  /** Run one client call, log it under `--verbose`, and bill its quota units (default 1). */
+  async function tracked<T>(label: string, call: () => Promise<T>, units = 1): Promise<T> {
     if (verbose) log(`[call] ${label}`);
     const result = await call();
-    quota.consume(1);
+    quota.consume(units);
     if (!warnedQuota && quota.total >= 8000) {
       warnedQuota = true;
       log(QUOTA_WARN);
@@ -276,9 +327,10 @@ export async function runIngest(
   }
 
   /**
-   * Steps 4–10: collect every row through `src/ingest/pipeline.ts`, then
-   * write them. Every write is deferred to step 10 (one atomic batch locally,
-   * chunked best-effort calls remotely). Throws on any failure.
+   * Steps 4–10: run the default Ingest stages into a buffering row sink,
+   * then write its rows. Every write is deferred to step 10 (one atomic
+   * batch locally, chunked best-effort calls remotely). Throws on any
+   * failure.
    */
   async function runPipeline(): Promise<IngestSummary> {
     const ctx: PipelineContext = {
@@ -290,13 +342,22 @@ export async function runIngest(
     };
     // `running` is instrumentation only (ADR-0005): the run is live and the
     // channel id is resolved. Best-effort — a reporting failure never aborts.
-    const rows = await collectIngestRows(ctx, channelInput, async (channel) => {
-      await statusReporter?.running(channel.id);
+    const buffer = createBufferingSink();
+    const state = await runIngestStages(ctx, channelInput, defaultIngestStages, {
+      emit: async (batch) => {
+        await buffer.emit(batch);
+        if ('channel' in batch) await statusReporter?.running(batch.channel.id);
+      },
     });
+    const rows = buffer.rows();
     const { videos, comments, anchors } = rows;
+    const replies = comments.filter((comment) => (comment.parentId ?? null) !== null).length;
+    const topLevel = comments.length - replies;
+    const skippedVideos =
+      (state.skippedVideoIds?.length ?? 0) + (state.commentsSkippedVideoIds?.length ?? 0);
 
-    // 10. Persist the whole run: channel → videos → comments → anchors (FK
-    // order). Locally this is one atomic batch (ADR-0001 all-or-nothing);
+    // 10. Persist the whole run: channel → videos → comments (top-level, then
+    // Replies) → anchors (FK order). Locally this is one atomic batch (ADR-0001 all-or-nothing);
     // remotely it is chunked, best-effort D1 HTTP calls (no documented
     // atomicity) that rely on the idempotent upserts + re-run for repair.
     const statements = ingestStatements(rows);
@@ -306,17 +367,55 @@ export async function runIngest(
       await db.batch(statements);
     }
 
+    // 11. Live chat (opt-in, ADR-0009): after the main write, so every
+    // LiveChatMessage's VideoRecord exists; each poll is flushed at once.
+    let chatMessages = 0;
+    if (liveChat) {
+      chatMessagesWritten = 0;
+      const chatSink: RowSink = {
+        emit: async (batch) => {
+          if (!('chatMessages' in batch)) {
+            throw new Error('live-chat stage emitted a non-chat batch');
+          }
+          const chatStatements = liveChatMessageStatements(batch.chatMessages);
+          if (writer !== undefined) {
+            await writer.apply(chatStatements);
+          } else if (db !== undefined) {
+            await db.batch(chatStatements);
+          }
+          chatMessagesWritten = (chatMessagesWritten ?? 0) + batch.chatMessages.length;
+        },
+      };
+      const chatStage = createLiveChatStage({
+        budgetUnits: args.liveChatBudget ?? DEFAULT_LIVE_CHAT_BUDGET_UNITS,
+        sleep,
+        now,
+      });
+      await runIngestStages(ctx, channelInput, [chatStage], chatSink, state);
+      chatMessages = chatMessagesWritten;
+    }
+
     // Instrumentation only: final counts land with the terminal `done`
     // update, batched into one writer call. Best-effort, never throws.
     if (statusReporter !== undefined) {
-      await statusReporter.complete({ videos: videos.length, comments: comments.length });
+      await statusReporter.complete({
+        videos: videos.length,
+        comments: topLevel,
+        replies,
+        skippedVideos,
+        quotaUsed: quota.total,
+        chatMessages,
+      });
     }
 
     return {
       channels: 1,
       videos: videos.length,
-      comments: comments.length,
+      comments: topLevel,
+      replies,
       anchors: anchors.length,
+      skippedVideos,
+      chatMessages,
     };
   }
 
@@ -331,7 +430,8 @@ export async function runIngest(
     log('Done.');
     log(
       `channels=${summary.channels} videos=${summary.videos} comments=${summary.comments} ` +
-        `anchors=${summary.anchors} duration=${durationSeconds.toFixed(1)}s quota=${quota.total}`,
+        `anchors=${summary.anchors} duration=${durationSeconds.toFixed(1)}s quota=${quota.total} ` +
+        `replies=${summary.replies} skipped=${summary.skippedVideos} chat=${summary.chatMessages}`,
     );
     return 0;
   } catch (err) {
@@ -347,6 +447,10 @@ export interface IngestCliArgs {
   verbose: boolean;
   remote: boolean;
   reportStatus?: string;
+  /** `--live-chat`: capture on-air Broadcasts' chat; set only when given. */
+  liveChat?: boolean;
+  /** `--live-chat-budget <units>`: set only when given. */
+  liveChatBudget?: number;
   /** Set when the flags are invalid; the shim prints `Error: <error>` and exits 1. */
   error?: string;
 }
@@ -354,7 +458,8 @@ export interface IngestCliArgs {
 /**
  * Parse `pnpm ingest` argv (without `node`/script). Flags may appear in any
  * order; the first non-flag argument is the channel. `--report-status` takes
- * its value either as the next argument or inline (`--report-status=<id>`).
+ * its value either as the next argument or inline (`--report-status=<id>`);
+ * so does `--live-chat-budget`, which must be a positive integer.
  */
 export function parseIngestArgs(argv: string[]): IngestCliArgs {
   const parsed: IngestCliArgs = { verbose: false, remote: false };
@@ -364,6 +469,21 @@ export function parseIngestArgs(argv: string[]): IngestCliArgs {
       parsed.verbose = true;
     } else if (arg === '--remote') {
       parsed.remote = true;
+    } else if (arg === '--live-chat') {
+      parsed.liveChat = true;
+    } else if (arg === '--live-chat-budget' || arg.startsWith('--live-chat-budget=')) {
+      const inlineValue = arg.startsWith('--live-chat-budget=')
+        ? arg.slice('--live-chat-budget='.length)
+        : undefined;
+      const value = inlineValue ?? argv[index + 1];
+      if (value === undefined || !/^[1-9]\d*$/.test(value)) {
+        return {
+          ...parsed,
+          error: '--live-chat-budget requires a positive integer <units> value.',
+        };
+      }
+      parsed.liveChatBudget = Number(value);
+      if (inlineValue === undefined) index += 1;
     } else if (arg === '--report-status' || arg.startsWith('--report-status=')) {
       const inlineValue = arg.startsWith('--report-status=')
         ? arg.slice('--report-status='.length)
@@ -403,6 +523,8 @@ if (isCli) {
     verbose: parsed.verbose,
     remote: parsed.remote,
     ...(parsed.reportStatus !== undefined ? { reportStatus: parsed.reportStatus } : {}),
+    ...(parsed.liveChat !== undefined ? { liveChat: parsed.liveChat } : {}),
+    ...(parsed.liveChatBudget !== undefined ? { liveChatBudget: parsed.liveChatBudget } : {}),
   }).then(
     (code) => process.exit(code),
     (err: unknown) => {

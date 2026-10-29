@@ -9,6 +9,12 @@
  * - `Channel` / `VideoRecord` / `CommentRecord` / `TimeAnchor` mirror the SQLite tables 1:1.
  * - `TimestampedComment` is a derived view: a `CommentRecord` whose `has_anchors = 1`.
  * - `ChannelInput` is a discriminated union from `parseChannelInput` (#T03).
+ * - v2 (spec docs/spec/v2.md, F1 #47): Broadcast fields on `VideoRecord`,
+ *   Reply fields on `CommentRecord`, `LiveChatMessage`, and the search
+ *   contract (`SearchQuery`, `SearchHit`). New record fields are optional
+ *   until every producer writes them. F3a (#49): the Ingest now fills all of
+ *   them; they stay optional so hand-built fixtures keep compiling, and the
+ *   write model (`db/ingest-writes`) supplies the defaults.
  */
 
 /** One YouTube channel — one row in `channels`. */
@@ -23,7 +29,19 @@ export interface Channel {
   fetchedAt: string;
 }
 
-/** One uploaded video on a channel — one row in `videos`. */
+/** Whether a VideoRecord is a plain upload or a Broadcast (GLOSSARY.md). */
+export type VideoKind = 'upload' | 'broadcast';
+
+/**
+ * A stored Broadcast's state: on air, or over. Upcoming Broadcasts are
+ * skipped at Ingest and never stored (spec v2 "Classification of Broadcasts").
+ */
+export type BroadcastState = 'live' | 'ended';
+
+/**
+ * One video in the Catalog — one row in `videos` (GLOSSARY.md: VideoRecord);
+ * either a plain upload or a Broadcast.
+ */
 export interface VideoRecord {
   /** YouTube video ID. */
   id: string;
@@ -42,9 +60,25 @@ export interface VideoRecord {
   commentCount: number;
   /** ISO-8601 UTC; ADR-0001. */
   fetchedAt: string;
+  /** `'broadcast'` iff `videos.list` returned `liveStreamingDetails`; DB default `'upload'`. */
+  kind?: VideoKind;
+  /** Set for a Broadcast; `null` for an upload. */
+  broadcastState?: BroadcastState | null;
+  /** ISO-8601 UTC; `liveStreamingDetails.actualStartTime`, Broadcasts only. */
+  actualStartTime?: string | null;
+  /** ISO-8601 UTC; `liveStreamingDetails.actualEndTime`, once a Broadcast ends. */
+  actualEndTime?: string | null;
+  /**
+   * Normalized `title + ' ' + description` (ADR-0010). Ingest always sets it
+   * (F3a, #49); when absent, the write model derives it.
+   */
+  searchText?: string;
 }
 
-/** One top-level comment — one row in `comments`. Replies out of scope. */
+/**
+ * One YouTube comment in the Catalog — one row in `comments` (GLOSSARY.md:
+ * CommentRecord), top-level or a Reply (`parentId` set).
+ */
 export interface CommentRecord {
   /** YouTube comment ID. */
   id: string;
@@ -53,8 +87,17 @@ export interface CommentRecord {
   /** FK to `channels.id`. */
   channelId: string;
   author: string;
+  /** Author's YouTube channel id (`snippet.authorChannelId.value`); `''` when unknown. */
+  authorChannelId?: string;
+  /** The parent CommentRecord's id for a Reply; `null` for a top-level CommentRecord. */
+  parentId?: string | null;
   /** Plain text; `textFormat=plainText` at fetch time. */
   text: string;
+  /**
+   * Normalized `text` (ADR-0010). Ingest always sets it (F3a, #49); when
+   * absent, the write model derives it.
+   */
+  searchText?: string;
   /** ISO-8601 UTC. */
   publishedAt: string;
   likeCount: number;
@@ -86,6 +129,119 @@ export interface TimestampedComment extends CommentRecord {
   hasAnchors: 1;
 }
 
+/**
+ * One message posted to a Broadcast's live chat while it was on air — one row
+ * in `live_chat_messages` (GLOSSARY.md: LiveChatMessage; ADR-0009). Only text
+ * messages and Super Chat comments are stored; no TimeAnchors are detected.
+ */
+export interface LiveChatMessage {
+  /** YouTube liveChatMessage id. */
+  id: string;
+  /** FK to `videos.id` (the Broadcast). */
+  videoId: string;
+  /** FK to `channels.id`. */
+  channelId: string;
+  /** `authorDetails.displayName`. */
+  author: string;
+  /** `authorDetails.channelId`. */
+  authorChannelId: string;
+  /** Message text (redacted in `live_chat_messages_active` once expired). */
+  text: string;
+  /** ISO-8601 UTC; `snippet.publishedAt`. */
+  publishedAt: string;
+  /** `max(0, floor((publishedAt − actualStartTime) / 1000))`. */
+  offsetSeconds: number;
+  /**
+   * `normalizeSearchText(text)` (ADR-0010). Optional like the other v2 record
+   * fields; the write model derives it when absent (F3b, #52).
+   */
+  searchText?: string;
+  /** ISO-8601 UTC; ADR-0001. */
+  fetchedAt: string;
+  /** ISO-8601 UTC; computed in the `live_chat_messages_active` view. */
+  expiresAt?: string;
+  /** Computed in the `live_chat_messages_active` view. */
+  isExpired?: boolean;
+}
+
+/**
+ * What a SearchHit is: a top-level CommentRecord, a Reply, a LiveChatMessage,
+ * or a VideoRecord (GLOSSARY.md: SearchHit; spec v2 `kind` param).
+ */
+export type SearchHitKind = 'comment' | 'reply' | 'chat' | 'video';
+
+/** Order of SearchHits; LiveChatMessages and videos sort as 0 likes. */
+export type SearchSort = 'newest' | 'oldest' | 'likes';
+
+/**
+ * A Visitor's combination of terms, date range, author and record kinds,
+ * evaluated against the Catalog alone (GLOSSARY.md: SearchQuery; spec v2
+ * "SearchQuery contract", ADR-0010). Already validated: dates are
+ * `YYYY-MM-DD`, inclusive.
+ */
+export interface SearchQuery {
+  /** Normalized terms, all of which must match `search_text`; at most 8. */
+  terms: string[];
+  /** Record kinds to search; default `comment`, `reply`, `chat`. */
+  kinds: SearchHitKind[];
+  /** `UC…` Channel scope; `null` for every Channel. */
+  channelId: string | null;
+  /** Earliest hit `publishedAt` day (UTC), inclusive. */
+  from: string | null;
+  /** Latest hit `publishedAt` day (UTC), inclusive. */
+  to: string | null;
+  /** Earliest source-video `publishedAt` day (UTC), inclusive. */
+  videoFrom: string | null;
+  /** Latest source-video `publishedAt` day (UTC), inclusive. */
+  videoTo: string | null;
+  /** `UC…` (24 chars) → exact `authorChannelId`; otherwise normalized display-name substring. */
+  author: string | null;
+  /** Only CommentRecords with TimeAnchors (and all LiveChatMessages). */
+  timestamped: boolean;
+  /** Hit order; default `newest`. */
+  sort: SearchSort;
+  /** 1-based page, 25 hits per page, at most 40. */
+  page: number;
+}
+
+/**
+ * One CommentRecord, LiveChatMessage or VideoRecord matched by a SearchQuery,
+ * together with where it points in its source video (GLOSSARY.md: SearchHit;
+ * spec v2 "SearchHit links").
+ */
+export interface SearchHit {
+  /** Which record kind matched. */
+  kind: SearchHitKind;
+  /** The source video (the VideoRecord itself for `kind = 'video'`). */
+  videoId: string;
+  /** The source video's title. */
+  videoTitle: string;
+  /** The matched record's id: comment, message or video id. */
+  recordId: string;
+  /** Author display name; `''` for a video. */
+  author: string;
+  /** Author's channel id; `''` when unknown or for a video. */
+  authorChannelId: string;
+  /** ISO-8601 UTC; the hit's own `publishedAt`. */
+  publishedAt: string;
+  /** Matched text (comment/message text, or the video title). */
+  text: string;
+  /** Likes; `0` for LiveChatMessages. */
+  likeCount: number;
+  /** TimeAnchor seconds of a CommentRecord, in text order; `[]` otherwise. */
+  anchorSeconds: number[];
+  /** A LiveChatMessage's offset in seconds; `null` otherwise. */
+  offsetSeconds: number | null;
+  /** The parent CommentRecord's id for a Reply; `null` otherwise. */
+  parentId: string | null;
+  /**
+   * The parent CommentRecord's author for a Reply, so the hit can say which
+   * comment it answers (spec v2 story 50); `null` otherwise or when the
+   * parent is not in the Catalog. Always set by `searchCatalog` (F4 #50).
+   */
+  parentAuthor?: string | null;
+}
+
 /** Discriminated union produced by `parseChannelInput` (#T03). */
 export type ChannelInput = { kind: 'handle'; value: string } | { kind: 'id'; value: string };
 
@@ -111,7 +267,7 @@ export interface IngestRequest {
   status: 'queued' | 'running' | 'done' | 'failed';
   /** Videos written so far (0 until the runner reports progress). */
   videosWritten: number;
-  /** Comments written so far. */
+  /** Top-level CommentRecords written so far (Replies are `repliesWritten`). */
   commentsWritten: number;
   /** Error message when status is `failed`. */
   error: string | null;
@@ -121,4 +277,16 @@ export interface IngestRequest {
   updatedAt: string;
   /** ISO-8601 UTC; set on done/failed. */
   finishedAt?: string | null;
+  /** Who pays for the Ingest: the repo key or an OperatorKey (ADR-0007). DB default `'repo'`. */
+  keySource?: 'repo' | 'operator';
+  /** Whether LiveChatMessages of on-air Broadcasts are captured (ADR-0009). */
+  captureLiveChat?: boolean;
+  /** Replies written so far. */
+  repliesWritten?: number;
+  /** LiveChatMessages written so far. */
+  chatMessagesWritten?: number;
+  /** Videos skipped and not stored (upcoming Broadcasts). */
+  skippedVideos?: number;
+  /** Quota units spent by the run so far. */
+  quotaUsed?: number;
 }
