@@ -13,7 +13,7 @@
  * `column LIKE '%' || ? || '%' ESCAPE '\'`, with the term passed through
  * {@link escapeLike} so `%`, `_` and `\` match literally.
  *
- * No production caller yet: search (ticket F4) is the first one.
+ * First production caller: Catalog search, F4 (#50), `./catalog-search.ts`.
  */
 import type { Statement } from './executor.ts';
 
@@ -24,13 +24,19 @@ export type SqlValue = string | number | null;
  * One typed predicate over a column. `column` is a code-side identifier
  * (`name` or `alias.name`), never a request value.
  *
- * - `eq` / `gte` / `lte`: `column = ?`, `column >= ?`, `column <= ?`.
+ * - `eq` / `gte` / `lte` / `lt`: `column = ?`, `column >= ?`, `column <= ?`,
+ *   `column < ?`.
+ * - `isNull` / `notNull`: `column IS NULL`, `column IS NOT NULL` (no param).
  * - `in`: `column IN (?, …)`; an empty `values` list matches no row.
+ * - `inJson`: `column IN (SELECT value FROM json_each(?))`, the list bound as
+ *   one JSON array param, so a long list never hits D1's bound-parameter cap
+ *   (F4 #50: author names resolved in JS). An empty list matches no row.
  * - `contains`: LIKE-escaped substring match (ADR-0010).
  */
 export type Predicate =
-  | { op: 'eq' | 'gte' | 'lte'; column: string; value: SqlValue }
-  | { op: 'in'; column: string; values: readonly SqlValue[] }
+  | { op: 'eq' | 'gte' | 'lte' | 'lt'; column: string; value: SqlValue }
+  | { op: 'isNull' | 'notNull'; column: string }
+  | { op: 'in' | 'inJson'; column: string; values: readonly SqlValue[] }
   | { op: 'contains'; column: string; value: string };
 
 /** What {@link buildQuery} appends to a base `SELECT`. */
@@ -69,7 +75,7 @@ function count(name: string, value: number): number {
   return value;
 }
 
-const COMPARATORS = { eq: '=', gte: '>=', lte: '<=' } as const;
+const COMPARATORS = { eq: '=', gte: '>=', lte: '<=', lt: '<' } as const;
 
 function compile(predicate: Predicate): { sql: string; params: SqlValue[] } {
   const target = column(predicate.column);
@@ -77,12 +83,23 @@ function compile(predicate: Predicate): { sql: string; params: SqlValue[] } {
     case 'eq':
     case 'gte':
     case 'lte':
+    case 'lt':
       return { sql: `${target} ${COMPARATORS[predicate.op]} ?`, params: [predicate.value] };
     case 'in':
       if (predicate.values.length === 0) return { sql: '0 = 1', params: [] };
       return {
         sql: `${target} IN (${predicate.values.map(() => '?').join(', ')})`,
         params: [...predicate.values],
+      };
+    case 'isNull':
+      return { sql: `${target} IS NULL`, params: [] };
+    case 'notNull':
+      return { sql: `${target} IS NOT NULL`, params: [] };
+    case 'inJson':
+      if (predicate.values.length === 0) return { sql: '0 = 1', params: [] };
+      return {
+        sql: `${target} IN (SELECT value FROM json_each(?))`,
+        params: [JSON.stringify(predicate.values)],
       };
     case 'contains':
       return {

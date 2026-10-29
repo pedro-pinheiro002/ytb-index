@@ -12,10 +12,11 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Channel, VideoRecord } from '../shared/types.ts';
-import { createD1Executor, type D1Binding, type D1PreparedStatement } from './d1.ts';
+import { createD1Executor } from './d1.ts';
 import type { Executor } from './executor.ts';
 import { buildQuery, escapeLike, type BuiltQuery, type QueryOptions } from './filter.ts';
 import { upsertChannel, upsertVideos } from './ingest-writes.ts';
+import { SqliteBackedBinding } from './sqlite-backed-d1.ts';
 import { openCatalog, type SqliteExecutor } from './sqlite.ts';
 
 const CHANNEL: Channel = {
@@ -58,36 +59,6 @@ const VIDEOS: VideoRecord[] = [
 
 const SELECT = 'SELECT id FROM videos';
 const ORDERINGS = { newest: 'published_at DESC, id DESC', oldest: 'published_at ASC, id ASC' };
-
-/** A `D1Binding` double that records bound statements and runs them on SQLite. */
-class SqliteBackedBinding implements D1Binding {
-  readonly bound: Array<{ sql: string; params: unknown[] }> = [];
-  readonly #db: Executor;
-
-  constructor(db: Executor) {
-    this.#db = db;
-  }
-
-  prepare(sql: string): D1PreparedStatement {
-    return this.#statement(sql, []);
-  }
-
-  #statement(sql: string, params: unknown[]): D1PreparedStatement {
-    return {
-      bind: (...values: unknown[]) => {
-        this.bound.push({ sql, params: values });
-        return this.#statement(sql, values);
-      },
-      all: async <T>() => ({ results: await this.#db.all<T>(sql, params) }),
-      first: async <T>() => (await this.#db.get<T>(sql, params)) ?? null,
-      run: async () => ({ meta: { changes: await this.#db.run(sql, params) } }),
-    };
-  }
-
-  async batch(): Promise<unknown[]> {
-    throw new Error('not used by these tests');
-  }
-}
 
 let sqlite: SqliteExecutor;
 let binding: SqliteBackedBinding;
@@ -212,5 +183,30 @@ describe('escapeLike', () => {
   it('prefixes \\, % and _ with a backslash and leaves the rest alone', () => {
     assert.equal(escapeLike('plain text'), 'plain text');
     assert.equal(escapeLike('50%_off\\now'), '50\\%\\_off\\\\now');
+  });
+});
+
+describe('buildQuery: lt, isNull / notNull, inJson (F4 #50)', () => {
+  it('lt is a strict upper bound', async () => {
+    const query = build({ where: [{ op: 'lt', column: 'published_at', value: '2024-02-01' }] });
+    assert.equal(query.sql, `${SELECT} WHERE published_at < ?`);
+    assert.deepEqual(await ids(query), ['v1']);
+  });
+
+  it('isNull / notNull bind no params', async () => {
+    const isNull = build({ where: [{ op: 'isNull', column: 'actual_start_time' }] });
+    assert.deepEqual(isNull, { sql: `${SELECT} WHERE actual_start_time IS NULL`, params: [] });
+    assert.deepEqual(await ids(isNull), ['v1', 'v2', 'v3', 'v4', 'v5']);
+    const notNull = build({ where: [{ op: 'notNull', column: 'actual_start_time' }] });
+    assert.equal(notNull.sql, `${SELECT} WHERE actual_start_time IS NOT NULL`);
+    assert.deepEqual(await ids(notNull), []);
+  });
+
+  it('inJson binds the whole list as one JSON param; empty matches nothing', async () => {
+    const query = build({ where: [{ op: 'inJson', column: 'title', values: ['a_b', 'axb'] }] });
+    assert.equal(query.sql, `${SELECT} WHERE title IN (SELECT value FROM json_each(?))`);
+    assert.deepEqual(query.params, ['["a_b","axb"]']);
+    assert.deepEqual(await ids(query), ['v3', 'v4']);
+    assert.deepEqual(await ids(build({ where: [{ op: 'inJson', column: 'id', values: [] }] })), []);
   });
 });

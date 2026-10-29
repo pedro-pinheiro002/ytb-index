@@ -6,7 +6,7 @@
  * a video's CommentRecords (via the TTL-redacting `comments_active` view,
  * ADR-0001) and TimeAnchors, per-video timestamped counts, Channels (latest,
  * by id, the switcher list) and the latest IngestRequest. Search (ADR-0010)
- * will join this module later, built on `./filter.ts`.
+ * lives beside it in `./catalog-search.ts` (F4 #50), built on `./filter.ts`.
  *
  * SQL is portable (positional `?` parameters only, no pragmas) so the same
  * strings run on better-sqlite3 and D1, and every value is bound, never

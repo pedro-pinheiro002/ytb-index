@@ -217,6 +217,12 @@ export interface SearchHit {
   offsetSeconds: number | null;
   /** The parent CommentRecord's id for a Reply; `null` otherwise. */
   parentId: string | null;
+  /**
+   * The parent CommentRecord's author for a Reply, so the hit can say which
+   * comment it answers (spec v2 story 50); `null` otherwise or when the
+   * parent is not in the Catalog. Always set by `searchCatalog` (F4 #50).
+   */
+  parentAuthor?: string | null;
 }
 
 /** Discriminated union produced by `parseChannelInput` (#T03). */
