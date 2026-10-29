@@ -1,10 +1,12 @@
 /**
  * Ingest CLI — full orchestrator (#19 / T06).
  *
- * One-shot pipeline: validate the API key, parse the channel argument, then
- * resolve the channel, page its uploads playlist, enrich the videos in batches
- * of 50, fetch each video's top-level comments, detect `TimeAnchor`s, and
- * persist everything. Default target is the local SQLite catalog (one atomic
+ * One-shot run: validate the API key, parse the channel argument, collect
+ * the Catalog rows through the Ingest pipeline (`../ingest/pipeline.ts`:
+ * resolve the channel, page its uploads, enrich videos, fetch top-level
+ * comments, detect `TimeAnchor`s), and persist everything. This file owns the
+ * CLI concerns: env, quota and call logging, the write target, status
+ * reporting, and exit codes. Default target is the local SQLite catalog (one atomic
  * `Executor.batch`); `--remote` sends the same statements to the production D1
  * database over the D1 HTTP API instead (chunked, best-effort — ADR-0003).
  * `--report-status <requestId>` (remote-only) additionally advances the
@@ -32,25 +34,19 @@ import 'dotenv/config';
 import { API_KEY_FAILURE_MESSAGES, validateApiKey } from '../yt/api-key.ts';
 import { parseChannelInput, UsageError } from '../yt/parse-channel.ts';
 import { ApiError, createYouTubeClient } from '../yt/client.ts';
-import type {
-  ChannelListResponse,
-  CommentResource,
-  Transport,
-  VideoResource,
-} from '../yt/client.ts';
-import { detectAnchors } from '../yt/anchors.ts';
+import type { Transport } from '../yt/client.ts';
 import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { createD1RestWriter, type D1RestWriter } from '../db/d1-http.ts';
 import { ingestStatements } from '../db/queries.ts';
+import {
+  ChannelNotFoundError,
+  collectIngestRows,
+  isQuotaExceeded,
+  type PipelineContext,
+} from '../ingest/pipeline.ts';
 import { createIngestStatusReporter, type IngestStatusReporter } from './status.ts';
-import type {
-  Channel,
-  ChannelInput,
-  CommentRecord,
-  TimeAnchor,
-  VideoRecord,
-} from '../shared/types.ts';
+import type { ChannelInput } from '../shared/types.ts';
 
 const DEFAULT_DB_PATH = './catalog.sqlite';
 const DEFAULT_API_KEY_ENV = 'YOUTUBE_API_KEY';
@@ -66,23 +62,10 @@ function missingRemoteEnvVars(): string[] {
   return REMOTE_ENV_VARS.filter((name) => (process.env[name] ?? '') === '');
 }
 
-const VIDEO_BATCH_SIZE = 50;
-const PLAYLIST_PAGE_SIZE = 50;
-const COMMENT_PAGE_SIZE = 100;
-
 /** Spec §5 — printed on stderr when the API reports quota exhaustion. */
 const QUOTA_MESSAGE = '[ERROR] quota exhausted, resets at midnight Pacific Time';
 /** Printed once when the running quota total crosses 8000 units. */
 const QUOTA_WARN = '[WARN] quota ~8000/10000 units used';
-
-/** Thrown when `channels.list` returns no items (unknown handle/id). */
-class ChannelNotFoundError extends Error {
-  override readonly name = 'ChannelNotFoundError';
-
-  constructor(input: string) {
-    super(`Error: channel not found: ${input}`);
-  }
-}
 
 /** Pipeline tallies reported in the summary line. */
 interface IngestSummary {
@@ -92,34 +75,9 @@ interface IngestSummary {
   anchors: number;
 }
 
-/** A fetched top-level comment, paired with the video it belongs to. */
-interface RawComment {
-  videoId: string;
-  comment: CommentResource;
-}
-
 // ---------------------------------------------------------------------------
-// Google error inspection
+// Error reporting
 // ---------------------------------------------------------------------------
-
-function errorEnvelope(
-  error: unknown,
-): { error?: { code?: number; errors?: Array<{ reason?: string }> } } | undefined {
-  if (!(error instanceof ApiError)) return undefined;
-  return error.googleError as
-    { error?: { code?: number; errors?: Array<{ reason?: string }> } } | undefined;
-}
-
-/** `googleError.error.errors[0].reason`, when present. */
-function apiErrorReason(error: unknown): string | undefined {
-  return errorEnvelope(error)?.error?.errors?.[0]?.reason;
-}
-
-/** True for the spec's `403 quotaExceeded` case. */
-function isQuotaExceeded(error: unknown): boolean {
-  const envelope = errorEnvelope(error);
-  return envelope?.error?.code === 403 && envelope.error.errors?.[0]?.reason === 'quotaExceeded';
-}
 
 /**
  * Map a thrown error to the spec §5 exit code, printing the right stderr
@@ -142,53 +100,6 @@ function reportIngestError(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`Error: ${message}\n`);
   return 1;
-}
-
-// ---------------------------------------------------------------------------
-// Video enrichment helpers
-// ---------------------------------------------------------------------------
-
-const THUMBNAIL_ORDER = ['maxres', 'standard', 'high', 'medium', 'default'] as const;
-
-/**
- * The client's `VideoResource` type only models the fields this project
- * consumes; `description` / `thumbnails` are part of the raw `videos.list`
- * payload, so we read them off an augmented view of the snippet.
- */
-type EnrichedSnippet = VideoResource['snippet'] & {
-  description?: string;
-  thumbnails?: Record<string, { url?: string } | undefined>;
-};
-
-function bestThumbnailUrl(videoId: string, thumbnails: EnrichedSnippet['thumbnails']): string {
-  for (const key of THUMBNAIL_ORDER) {
-    const url = thumbnails?.[key]?.url;
-    if (url !== undefined && url !== '') return url;
-  }
-  // Deterministic fallback that always resolves for a public video.
-  return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-}
-
-function toCount(value: string | undefined): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function toVideoRecord(video: VideoResource, channelId: string, fetchedAt: string): VideoRecord {
-  const snippet = video.snippet as EnrichedSnippet;
-  return {
-    id: video.id,
-    channelId,
-    title: snippet.title,
-    description: snippet.description ?? '',
-    publishedAt: snippet.publishedAt,
-    thumbnailUrl: bestThumbnailUrl(video.id, snippet.thumbnails),
-    durationIso8601: video.contentDetails.duration,
-    viewCount: toCount(video.statistics?.viewCount),
-    likeCount: toCount(video.statistics?.likeCount),
-    commentCount: toCount(video.statistics?.commentCount),
-    fetchedAt,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -365,148 +276,30 @@ export async function runIngest(
   }
 
   /**
-   * Steps 4–10. Reads the API and accumulates rows; every write is deferred to
-   * step 10 (one atomic batch locally, chunked best-effort calls remotely).
-   * Throws on any failure.
+   * Steps 4–10: collect every row through `src/ingest/pipeline.ts`, then
+   * write them. Every write is deferred to step 10 (one atomic batch locally,
+   * chunked best-effort calls remotely). Throws on any failure.
    */
   async function runPipeline(): Promise<IngestSummary> {
-    const fetchedAt = now().toISOString();
-
-    // 4. Resolve the channel (1 unit).
-    log('[4/8] Resolving channel...');
-    const channelResponse: ChannelListResponse = await tracked('channels.list', () =>
-      channelInput.kind === 'handle'
-        ? client.listChannel({ forHandle: channelInput.value })
-        : client.listChannel({ id: channelInput.value }),
-    );
-    const resource = channelResponse.items[0];
-    if (resource === undefined) {
-      throw new ChannelNotFoundError(channelInput.value);
-    }
-
-    // 5. Build the channel row (persisted with everything else in step 10).
-    const channel: Channel = {
-      id: resource.id,
-      title: resource.snippet.title,
-      uploadsPlaylistId: resource.contentDetails.relatedPlaylists.uploads,
-      fetchedAt,
+    const ctx: PipelineContext = {
+      client,
+      call: tracked,
+      log,
+      verbose,
+      fetchedAt: now().toISOString(),
     };
-
-    // Instrumentation only (ADR-0005): the run is live and the channel id is
-    // resolved. Best-effort — a reporting failure never aborts the ingest.
-    await statusReporter?.running(channel.id);
-
-    // 6. Page the uploads playlist, collecting video IDs (1 unit/page).
-    log('[5/8] Fetching uploads playlist...');
-    const videoIds: string[] = [];
-    let playlistPageToken: string | undefined;
-    for (;;) {
-      const page = await tracked('playlistItems.list', () =>
-        playlistPageToken === undefined
-          ? client.listPlaylistItems({
-              playlistId: channel.uploadsPlaylistId,
-              maxResults: PLAYLIST_PAGE_SIZE,
-            })
-          : client.listPlaylistItems({
-              playlistId: channel.uploadsPlaylistId,
-              maxResults: PLAYLIST_PAGE_SIZE,
-              pageToken: playlistPageToken,
-            }),
-      );
-      for (const item of page.items) {
-        const videoId = item.snippet.resourceId.videoId;
-        if (videoId !== undefined && videoId !== '') videoIds.push(videoId);
-      }
-      playlistPageToken = page.nextPageToken;
-      if (playlistPageToken === undefined) break;
-    }
-
-    // 7. Batch-enrich videos in chunks of ≤50 (1 unit/batch).
-    log(`[6/8] Enriching ${videoIds.length} videos...`);
-    const videos: VideoRecord[] = [];
-    for (let offset = 0; offset < videoIds.length; offset += VIDEO_BATCH_SIZE) {
-      const batch = videoIds.slice(offset, offset + VIDEO_BATCH_SIZE);
-      const page = await tracked('videos.list', () => client.listVideos({ id: batch }));
-      for (const item of page.items) {
-        videos.push(toVideoRecord(item, channel.id, fetchedAt));
-      }
-    }
-
-    // 8. Per-video comment pages (1 unit/page), top-level comments only.
-    log(`[7/8] Fetching comments for ${videos.length} videos...`);
-    const rawComments: RawComment[] = [];
-    for (const video of videos) {
-      const videoStartedMs = Date.now();
-      let beforeCount = rawComments.length;
-      let commentPageToken: string | undefined;
-      try {
-        for (;;) {
-          const page = await tracked(`commentThreads.list video=${video.id}`, () =>
-            commentPageToken === undefined
-              ? client.listCommentThreads({
-                  videoId: video.id,
-                  maxResults: COMMENT_PAGE_SIZE,
-                })
-              : client.listCommentThreads({
-                  videoId: video.id,
-                  maxResults: COMMENT_PAGE_SIZE,
-                  pageToken: commentPageToken,
-                }),
-          );
-          for (const thread of page.items) {
-            rawComments.push({ videoId: video.id, comment: thread.snippet.topLevelComment });
-          }
-          commentPageToken = page.nextPageToken;
-          if (commentPageToken === undefined) break;
-        }
-      } catch (err) {
-        const reason = apiErrorReason(err);
-        if (reason === 'commentsDisabled' || reason === 'videoNotFound') {
-          log(`[skip] ${video.id}: ${reason}`);
-          continue;
-        }
-        throw err;
-      }
-      if (verbose) {
-        log(
-          `[video] ${video.id} comments=${rawComments.length - beforeCount} (${Date.now() - videoStartedMs}ms)`,
-        );
-      }
-    }
-
-    // 9. Detect anchors per comment; denormalize `has_anchors`.
-    log('[8/8] Detecting timestamps and persisting...');
-    const comments: CommentRecord[] = [];
-    const anchors: TimeAnchor[] = [];
-    for (const { videoId, comment } of rawComments) {
-      const text = comment.snippet.textOriginal;
-      const detected = detectAnchors(text);
-      for (const anchor of detected) {
-        anchors.push({
-          commentId: comment.id,
-          seconds: anchor.seconds,
-          rawText: anchor.raw_text,
-          charPosition: anchor.char_position,
-        });
-      }
-      comments.push({
-        id: comment.id,
-        videoId,
-        channelId: channel.id,
-        author: comment.snippet.authorDisplayName,
-        text,
-        publishedAt: comment.snippet.publishedAt,
-        likeCount: comment.snippet.likeCount ?? 0,
-        hasAnchors: detected.length > 0 ? 1 : 0,
-        fetchedAt,
-      });
-    }
+    // `running` is instrumentation only (ADR-0005): the run is live and the
+    // channel id is resolved. Best-effort — a reporting failure never aborts.
+    const rows = await collectIngestRows(ctx, channelInput, async (channel) => {
+      await statusReporter?.running(channel.id);
+    });
+    const { videos, comments, anchors } = rows;
 
     // 10. Persist the whole run: channel → videos → comments → anchors (FK
     // order). Locally this is one atomic batch (ADR-0001 all-or-nothing);
     // remotely it is chunked, best-effort D1 HTTP calls (no documented
     // atomicity) that rely on the idempotent upserts + re-run for repair.
-    const statements = ingestStatements({ channel, videos, comments, anchors });
+    const statements = ingestStatements(rows);
     if (writer !== undefined) {
       await writer.apply(statements);
     } else if (db !== undefined) {

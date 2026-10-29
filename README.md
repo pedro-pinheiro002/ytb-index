@@ -113,12 +113,13 @@ src/
 ├── server/   # Hono app, SSR routes (/, /v/:videoId), operator + agent-hook APIs
 ├── yt/       # YouTube Data API v3 client + TimeAnchor detection + API-key validation
 ├── db/       # Executor interface, portable queries, SQLite / D1 / D1 HTTP drivers
-├── cli/      # Ingest entrypoint (src/cli/ingest.ts)
+├── ingest/   # Ingest pipeline steps: YouTube responses → Catalog rows
+├── cli/      # Ingest entrypoint (src/cli/ingest.ts): env, quota, writes, exit codes
 ├── agent/    # Sentry-triggered repair agent (ADR-0006), isolated from the rest
 └── shared/   # Cross-cutting types (Channel, VideoRecord, CommentRecord, TimeAnchor)
 ```
 
-Dependency arrows: `worker → server → db → shared`, `cli → yt → shared`, `cli → db → shared`. `shared/` is the leaf. These boundaries are enforced by [`src/architecture.test.ts`](src/architecture.test.ts).
+Dependency arrows: `worker → server → db → shared`, `cli → ingest → yt → shared`, `cli → db → shared`. `shared/` is the leaf. These boundaries are enforced by [`src/architecture.test.ts`](src/architecture.test.ts).
 
 The authoritative artifact for the SQLite schema is [`migrations/0001_init.sql`](migrations/0001_init.sql).
 

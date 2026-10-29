@@ -24,7 +24,8 @@ with no network: inject the existing seams (`transport`, `now`, `writer`,
 | `src/shared/`   | Domain types (`Channel`, `VideoRecord`, `CommentRecord`, `TimeAnchor`) |
 | `src/yt/`       | YouTube Data API client, quota, channel input parsing, TimeAnchor detection |
 | `src/db/`       | `Executor` interface, portable SQL, SQLite / D1 / D1 HTTP drivers     |
-| `src/cli/`      | The Ingest pipeline entry (`pnpm ingest`), status reporting           |
+| `src/ingest/`   | The Ingest pipeline: YouTube responses → Catalog rows, step by step   |
+| `src/cli/`      | `pnpm ingest`: env, quota, write target, status reporting, exit codes |
 | `src/server/`   | Hono app, SSR routes, operator ingest API, Sentry agent hook         |
 | `src/worker.ts` | Worker entry: the server app over the D1 binding                      |
 | `src/agent/`    | Sentry-triggered repair agent run in Actions (ADR-0006)               |
@@ -35,6 +36,7 @@ with no network: inject the existing seams (`transport`, `now`, `writer`,
 ## Boundaries (enforced by `src/architecture.test.ts`)
 
 - `shared` imports nothing; `yt` and `db` import only `shared`.
+- `ingest` imports `yt`, `db` and `shared`; `cli` adds `ingest`.
 - `server` imports only `db` and `shared`, never `yt` or `cli` (ADR-0002/0003).
 - The Worker import graph (`src/worker.ts` and everything it reaches) has no
   `node:*`, `better-sqlite3`, `@hono/node-server` or `dotenv`, and never reads

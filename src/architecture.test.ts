@@ -82,7 +82,11 @@ const ALLOWED: Record<string, { modules: string[]; rule: string }> = {
     rule: 'src/server must not import the ingest pipeline (src/yt, src/cli) — ADR-0002/0003.',
   },
   'worker.ts': { modules: ['server', 'db'], rule: 'src/worker.ts wires src/server to D1.' },
-  cli: { modules: ['yt', 'db', 'shared'], rule: 'src/cli orchestrates yt + db.' },
+  ingest: {
+    modules: ['yt', 'db', 'shared'],
+    rule: 'src/ingest (the Ingest pipeline) maps yt responses to Catalog rows.',
+  },
+  cli: { modules: ['ingest', 'yt', 'db', 'shared'], rule: 'src/cli runs the pipeline and writes.' },
   agent: {
     modules: [],
     rule: 'src/agent (repair agent) is isolated from the product code — ADR-0006.',
