@@ -4,7 +4,7 @@ v1 serves the Catalog from a Node process backed by better-sqlite3 — a native,
 
 ## Status
 
-accepted
+accepted — amended by ADR-0007: the server makes one outbound YouTube call, the token-gated OperatorKey check, through `fetch` and without importing `src/yt`. Everything else is unchanged.
 
 ## Considered Options
 

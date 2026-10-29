@@ -4,7 +4,7 @@ The web app becomes the operator's only surface: a token-gated trigger route cre
 
 ## Status
 
-accepted
+accepted — amended by ADR-0008: an IngestRequest may carry a sealed OperatorKey, and the `YOUTUBE_API_KEY` repo secret becomes the fallback used when it does not.
 
 ## Considered Options
 

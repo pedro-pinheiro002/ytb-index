@@ -4,7 +4,7 @@ ytb-index v1 fetches public YouTube data (videos, comments, anchors) using only 
 
 ## Status
 
-accepted
+accepted — amended by v2: the rule now also covers Replies and LiveChatMessages (ADR-0009), and Catalog search reads only through the `_active` views, so expired text can neither match nor be shown (ADR-0010). The 30-day window and the read-time redaction are unchanged.
 
 ## Considered Options
 
