@@ -20,7 +20,8 @@
     "test": "tsx --test --test-reporter=spec \"src/**/*.test.ts\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "pnpm typecheck && pnpm test && pnpm format:check && pnpm build:worker"
+    "check": "pnpm typecheck && pnpm test && pnpm format:check && pnpm build:worker",
+    "skills:sync": "tsx scripts/sync-skills.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

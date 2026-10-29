@@ -1,6 +1,8 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Issues and specs for this repo live as GitHub issues (`pedro-pinheiro002/ytb-index`).
+
+The commands below use the `gh` CLI. Where `gh` is unavailable or unauthenticated (for example a cloud session whose GitHub access goes through the GitHub MCP server), perform the **same operation** with the equivalent GitHub tool: `issue_write` (create, edit labels, assignees, close with `state_reason`), `issue_read` (get, comments, labels, sub-issues), `list_issues` / `search_issues`, `add_issue_comment`, `sub_issue_write`. The operation and its result are what matter, not the client. Do not fall back to unauthenticated `curl` against the API.
 
 ## Conventions
 
@@ -11,7 +13,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
+Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone. GitHub tools take `owner` and `repo` explicitly.
 
 ## Pull requests as a triage surface
 

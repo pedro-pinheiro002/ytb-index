@@ -79,9 +79,14 @@ propose an ADR rather than editing the rule in the test.
 
 ## Agent skills
 
+Skills are vendored in `.claude/skills/` (MIT, from `mattpocock/skills` at the
+commit pinned in `.claude/skills/skills.json`), so every agent sees the same
+set without an install step. To add, drop or update one, edit `skills.json`
+and run `pnpm skills:sync`; never hand-edit a vendored skill.
+
 ### Issue tracker
 
-Issues and specs live as GitHub issues (managed via `gh`). See `docs/agents/issue-tracker.md`.
+Issues and specs live as GitHub issues (managed via `gh`, or the GitHub MCP tools where `gh` is unavailable). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

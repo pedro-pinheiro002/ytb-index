@@ -1,0 +1,20 @@
+{
+  "source": "https://github.com/mattpocock/skills",
+  "commit": "59db609eb1e18aaf59b63284d0e52255aff0c63c",
+  "skills": {
+    "code-review": "skills/engineering/code-review",
+    "codebase-design": "skills/engineering/codebase-design",
+    "diagnosing-bugs": "skills/engineering/diagnosing-bugs",
+    "domain-modeling": "skills/engineering/domain-modeling",
+    "grill-with-docs": "skills/engineering/grill-with-docs",
+    "grilling": "skills/productivity/grilling",
+    "implement": "skills/engineering/implement",
+    "implement-spec": "skills/engineering/implement-spec",
+    "improve-codebase-architecture": "skills/engineering/improve-codebase-architecture",
+    "tdd": "skills/engineering/tdd",
+    "to-spec": "skills/engineering/to-spec",
+    "to-tickets": "skills/engineering/to-tickets",
+    "triage": "skills/engineering/triage",
+    "wayfinder": "skills/engineering/wayfinder"
+  }
+}
