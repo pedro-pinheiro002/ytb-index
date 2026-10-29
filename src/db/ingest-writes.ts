@@ -23,8 +23,18 @@
  * `search_text`). The v2 record fields are optional, so the defaults live
  * here: `'upload'`, `NULL`, `''`, and `search_text` derived with
  * `normalizeSearchText` when a record does not carry it.
+ *
+ * F3b (#52, ADR-0009): upserts of LiveChatMessages
+ * ({@link liveChatMessageStatements}), which the CLI's live-chat sink writes
+ * one poll at a time after the main Ingest write.
  */
-import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
+import type {
+  Channel,
+  CommentRecord,
+  LiveChatMessage,
+  TimeAnchor,
+  VideoRecord,
+} from '../shared/types.ts';
 import type { Executor, Statement } from './executor.ts';
 import { normalizeSearchText } from './search-text.ts';
 // ---------------------------------------------------------------------------
@@ -191,6 +201,50 @@ export async function upsertAnchors(executor: Executor, anchors: TimeAnchor[]): 
   await executor.batch(anchorStatements(anchors));
 }
 
+const UPSERT_LIVE_CHAT_MESSAGE_SQL = `
+  INSERT INTO live_chat_messages (
+    id, video_id, channel_id, author, author_channel_id, text,
+    published_at, offset_seconds, search_text, fetched_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    video_id = excluded.video_id,
+    channel_id = excluded.channel_id,
+    author = excluded.author,
+    author_channel_id = excluded.author_channel_id,
+    text = excluded.text,
+    published_at = excluded.published_at,
+    offset_seconds = excluded.offset_seconds,
+    search_text = excluded.search_text,
+    fetched_at = excluded.fetched_at
+`;
+
+function liveChatMessageParams(message: LiveChatMessage): unknown[] {
+  return [
+    message.id,
+    message.videoId,
+    message.channelId,
+    message.author,
+    message.authorChannelId,
+    message.text,
+    message.publishedAt,
+    message.offsetSeconds,
+    message.searchText ?? normalizeSearchText(message.text),
+    message.fetchedAt,
+  ];
+}
+
+/**
+ * Idempotent upserts for `messages` (ADR-0009), in input order. Their
+ * Broadcast's VideoRecord and Channel must already be in the Catalog.
+ */
+export function liveChatMessageStatements(messages: LiveChatMessage[]): Statement[] {
+  return messages.map((message) => ({
+    sql: UPSERT_LIVE_CHAT_MESSAGE_SQL,
+    params: liveChatMessageParams(message),
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // Ingest batch
 // ---------------------------------------------------------------------------
@@ -201,19 +255,29 @@ export interface IngestRows {
   videos: VideoRecord[];
   comments: CommentRecord[];
   anchors: TimeAnchor[];
+  /** LiveChatMessages (F3b, #52); written after every other row. */
+  chatMessages?: LiveChatMessage[];
 }
 
 /**
  * Flatten one ingest run into a single statement list for `Executor.batch`.
- * Order is channels → videos → top-level comments → Replies → anchors so
+ * Order is channels → videos → top-level comments → Replies → anchors →
+ * LiveChatMessages so
  * foreign keys resolve;
  * the batch itself is atomic (ADR-0001's all-or-nothing catalog refresh).
  */
-export function ingestStatements({ channel, videos, comments, anchors }: IngestRows): Statement[] {
+export function ingestStatements({
+  channel,
+  videos,
+  comments,
+  anchors,
+  chatMessages = [],
+}: IngestRows): Statement[] {
   return [
     channelStatement(channel),
     ...videoStatements(videos),
     ...commentStatements(comments),
     ...anchorStatements(anchors),
+    ...liveChatMessageStatements(chatMessages),
   ];
 }

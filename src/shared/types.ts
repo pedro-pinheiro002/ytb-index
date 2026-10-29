@@ -151,6 +151,11 @@ export interface LiveChatMessage {
   publishedAt: string;
   /** `max(0, floor((publishedAt − actualStartTime) / 1000))`. */
   offsetSeconds: number;
+  /**
+   * `normalizeSearchText(text)` (ADR-0010). Optional like the other v2 record
+   * fields; the write model derives it when absent (F3b, #52).
+   */
+  searchText?: string;
   /** ISO-8601 UTC; ADR-0001. */
   fetchedAt: string;
   /** ISO-8601 UTC; computed in the `live_chat_messages_active` view. */

@@ -19,6 +19,8 @@ import type {
   CommentResource,
   CommentThread,
   CommentThreadListResponse,
+  LiveChatMessageListResponse,
+  LiveChatMessageResource,
   PlaylistItemListResponse,
   Transport,
   VideoResource,
@@ -130,6 +132,11 @@ interface FakeConfig {
   comments?: Record<string, CommentThreadListResponse | Response>;
   /** `comments.list` pages per `parentId`, served in order by `pageToken`. */
   replies?: Record<string, CommentListResponse[]>;
+  /**
+   * `liveChat/messages` pages per `liveChatId`, served in order by
+   * `pageToken` (the index); a `Response` is served verbatim as an error.
+   */
+  liveChat?: Record<string, Array<LiveChatMessageListResponse | Response>>;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -203,6 +210,16 @@ function makeTransport(config: FakeConfig): { transport: Transport; calls: strin
       const page = pages[token === null ? 0 : Number(token)];
       if (page === undefined) throw new Error(`fake transport: no reply page ${token}`);
       return jsonResponse(page);
+    }
+
+    if (path.endsWith('/liveChat/messages')) {
+      const liveChatId = parsed.searchParams.get('liveChatId') ?? '';
+      const pages = config.liveChat?.[liveChatId];
+      if (pages === undefined) throw new Error(`fake transport: no chat for ${liveChatId}`);
+      const token = parsed.searchParams.get('pageToken');
+      const page = pages[token === null ? 0 : Number(token)];
+      if (page === undefined) throw new Error(`fake transport: no chat page ${token}`);
+      return page instanceof Response ? page : jsonResponse(page);
     }
 
     throw new Error(`fake transport: unexpected URL ${url}`);
@@ -619,13 +636,14 @@ describe('runIngest', () => {
     const done = statusApplied[1]![0]!;
     assert.match(done.sql, /status = 'done'/);
     assert.match(done.sql, /finished_at = \?/);
-    // videos, comments, replies, skipped_videos, quota_used (5 calls).
+    // videos, comments, replies, skipped_videos, quota_used (5 calls), chat messages.
     assert.deepEqual(done.params, [
       2,
       2,
       0,
       0,
       5,
+      0,
       '2024-03-01T00:00:00.000Z',
       '2024-03-01T00:00:00.000Z',
       'req-1',
@@ -1035,7 +1053,7 @@ describe('runIngest v2: Broadcasts and Replies (F3a)', () => {
 
     assert.match(
       stdout(),
-      /channels=1 videos=3 comments=2 anchors=3 duration=\d+\.\ds quota=7 replies=4 skipped=1/,
+      /channels=1 videos=3 comments=2 anchors=3 duration=\d+\.\ds quota=7 replies=4 skipped=2/,
     );
   });
 
@@ -1135,19 +1153,514 @@ describe('runIngest v2: Broadcasts and Replies (F3a)', () => {
       done.sql,
       /comments_written = \?, replies_written = \?, skipped_videos = \?, quota_used = \?/,
     );
-    // videos, comments (top-level only), replies, skipped, quota.
+    // videos, comments (top-level only), replies, skipped, quota, chat messages.
     assert.deepEqual(done.params, [
       3,
       2,
       4,
-      1,
+      2,
       7,
+      0,
       '2024-03-01T00:00:00.000Z',
       '2024-03-01T00:00:00.000Z',
       'req-9',
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Live-chat capture fixtures (F3b, #52, ADR-0009)
+// ---------------------------------------------------------------------------
+
+const CHAT_PLAYLIST: PlaylistItemListResponse = {
+  items: ['up1', 'live1'].map((videoId) => ({
+    id: `PL_${videoId}`,
+    snippet: { title: videoId, publishedAt: '2024-01-01T00:00:00Z', resourceId: { videoId } },
+  })),
+};
+
+const CHAT_VIDEOS: VideoResource[] = [
+  v2Video('up1', 'Plain Upload', { liveBroadcastContent: 'none' }),
+  v2Video('live1', 'On Air', {
+    liveBroadcastContent: 'live',
+    liveStreamingDetails: {
+      actualStartTime: '2024-03-01T00:00:00Z',
+      activeLiveChatId: 'chat1',
+    },
+  }),
+];
+
+/** A live chat message resource of `type`; `UC_<author>` is the author's channel. */
+function chatItem(
+  id: string,
+  type: string,
+  publishedAt: string,
+  author: string,
+  snippet: Partial<LiveChatMessageResource['snippet']> = {},
+): LiveChatMessageResource {
+  return {
+    id,
+    snippet: { type, publishedAt, ...snippet },
+    authorDetails: { displayName: author, channelId: `UC_${author}` },
+  };
+}
+
+/** Two polls: mixed event types, then `offlineAt` on the last page. */
+function chatPages(): LiveChatMessageListResponse[] {
+  return [
+    {
+      items: [
+        // Posted before actualStartTime → offset 0.
+        chatItem('m1', 'textMessageEvent', '2024-02-29T23:59:50Z', 'alice', {
+          displayMessage: 'ignored when messageText is set',
+          textMessageDetails: { messageText: 'Olá, Mundo!' },
+        }),
+        chatItem('m2', 'superChatEvent', '2024-03-01T00:01:05.900Z', 'bob', {
+          superChatDetails: { userComment: 'Thanks a lot' },
+        }),
+        chatItem('m3', 'newSponsorEvent', '2024-03-01T00:02:00Z', 'carol', {
+          displayMessage: 'carol is a member',
+        }),
+        chatItem('m4', 'superChatEvent', '2024-03-01T00:03:00Z', 'dan', {
+          superChatDetails: {},
+        }),
+      ],
+      nextPageToken: '1',
+      pollingIntervalMillis: 5000,
+    },
+    {
+      items: [
+        chatItem('m5', 'textMessageEvent', '2024-03-01T00:10:00Z', 'erin', {
+          displayMessage: 'at ten minutes',
+        }),
+      ],
+      nextPageToken: '2',
+      pollingIntervalMillis: 7000,
+      offlineAt: '2024-03-01T00:11:00Z',
+    },
+  ];
+}
+
+/** `count` polls of one message each, never offline. */
+function endlessChatPages(
+  count: number,
+  pollingIntervalMillis = 5000,
+): LiveChatMessageListResponse[] {
+  return Array.from({ length: count }, (_, index) => ({
+    items: [
+      chatItem(`e${index}`, 'textMessageEvent', '2024-03-01T00:00:30Z', 'alice', {
+        displayMessage: `message ${index}`,
+      }),
+    ],
+    nextPageToken: String(index + 1),
+    pollingIntervalMillis,
+  }));
+}
+
+function chatTransport(pages: Array<LiveChatMessageListResponse | Response> = chatPages()): {
+  transport: Transport;
+  calls: string[];
+} {
+  return makeTransport({
+    channel: CHANNEL,
+    playlistPages: [CHAT_PLAYLIST],
+    videos: CHAT_VIDEOS,
+    comments: { up1: { items: [] }, live1: { items: [] } },
+    liveChat: { chat1: pages },
+  });
+}
+
+/** A fake clock whose `sleep` records the wait and advances `now`. */
+function fakeClock(startMs: number): {
+  now: () => Date;
+  sleep: (ms: number) => Promise<void>;
+  sleeps: number[];
+} {
+  let current = startMs;
+  const sleeps: number[] = [];
+  return {
+    now: () => new Date(current),
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      current += ms;
+    },
+    sleeps,
+  };
+}
+
+const CHAT_START_MS = Date.parse('2024-03-01T00:20:00Z');
+const CHAT_FETCHED_AT = '2024-03-01T00:20:00.000Z';
+
+function useRemoteEnv(): void {
+  process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+  process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+  process.env['D1_DATABASE_ID'] = 'test-db';
+}
+
+function chatCalls(calls: string[]): string[] {
+  return calls.filter((url) => new URL(url).pathname.endsWith('/liveChat/messages'));
+}
+
+function chatStatements(applied: Statement[][]): Statement[] {
+  return applied.flat().filter((s) => /INSERT INTO live_chat_messages/.test(s.sql));
+}
+
+describe('runIngest v2: live-chat capture (F3b)', () => {
+  afterEach(() => {
+    delete process.env['INGEST_CAPTURE_LIVE_CHAT'];
+  });
+
+  it('polls an on-air Broadcast until offlineAt, storing text and Super Chat comments', async () => {
+    useRemoteEnv();
+    const { transport, calls } = chatTransport();
+    const { writer, applied } = fakeWriter();
+    const quota = new QuotaCounter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      liveChat: true,
+      writer,
+      transport,
+      quota,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    const polls = chatCalls(calls);
+    assert.equal(polls.length, 2);
+    assert.equal(new URL(polls[0]!).searchParams.get('pageToken'), null);
+    assert.equal(new URL(polls[1]!).searchParams.get('pageToken'), '1');
+    // Waits the server's interval between polls, not after the offline page.
+    assert.deepEqual(clock.sleeps, [5000]);
+    // channels + playlistItems + videos + commentThreads ×2 = 5, then 5 per poll.
+    assert.equal(quota.total, 15);
+
+    // The main write first, then one apply per poll.
+    assert.equal(applied.length, 3);
+    assert.equal(chatStatements([applied[0]!]).length, 0);
+    assert.equal(chatStatements([applied[1]!]).length, 2);
+    assert.equal(chatStatements([applied[2]!]).length, 1);
+    assert.deepEqual(
+      chatStatements(applied).map((s) => [
+        paramOf(s, 'id'),
+        paramOf(s, 'video_id'),
+        paramOf(s, 'channel_id'),
+        paramOf(s, 'author'),
+        paramOf(s, 'author_channel_id'),
+        paramOf(s, 'text'),
+        paramOf(s, 'offset_seconds'),
+        paramOf(s, 'search_text'),
+        paramOf(s, 'fetched_at'),
+      ]),
+      [
+        [
+          'm1',
+          'live1',
+          CHANNEL.id,
+          'alice',
+          'UC_alice',
+          'Olá, Mundo!',
+          0,
+          'ola mundo',
+          CHAT_FETCHED_AT,
+        ],
+        [
+          'm2',
+          'live1',
+          CHANNEL.id,
+          'bob',
+          'UC_bob',
+          'Thanks a lot',
+          65,
+          'thanks a lot',
+          CHAT_FETCHED_AT,
+        ],
+        [
+          'm5',
+          'live1',
+          CHANNEL.id,
+          'erin',
+          'UC_erin',
+          'at ten minutes',
+          600,
+          'at ten minutes',
+          CHAT_FETCHED_AT,
+        ],
+      ],
+    );
+    assert.match(stdout(), /\[chat\] live1 messages=3 polls=2 units=10/);
+    assert.match(
+      stdout(),
+      /channels=1 videos=2 comments=0 anchors=0 duration=\d+\.\ds quota=15 replies=0 skipped=0 chat=3\n/,
+    );
+  });
+
+  it('makes no live-chat call without --live-chat or INGEST_CAPTURE_LIVE_CHAT', async () => {
+    useRemoteEnv();
+    const { transport, calls } = chatTransport();
+    const { writer, applied } = fakeWriter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      writer,
+      transport,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    assert.equal(chatCalls(calls).length, 0);
+    assert.equal(applied.length, 1);
+    assert.deepEqual(clock.sleeps, []);
+    assert.match(stdout(), / chat=0\n/);
+  });
+
+  it('turns capture on from INGEST_CAPTURE_LIVE_CHAT=true (the workflow env)', async () => {
+    useRemoteEnv();
+    process.env['INGEST_CAPTURE_LIVE_CHAT'] = 'true';
+    const { transport, calls } = chatTransport();
+    const { writer } = fakeWriter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      writer,
+      transport,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    assert.equal(chatCalls(calls).length, 2);
+  });
+
+  it('stops polling at the chat budget, keeps the rows and still succeeds', async () => {
+    useRemoteEnv();
+    const { transport, calls } = chatTransport(endlessChatPages(10));
+    const { writer, applied } = fakeWriter();
+    const quota = new QuotaCounter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      liveChat: true,
+      liveChatBudget: 12,
+      writer,
+      transport,
+      quota,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    // 5 + 5 = 10 units; a third poll would reach 15 > 12.
+    assert.equal(chatCalls(calls).length, 2);
+    assert.equal(quota.total, 5 + 10);
+    assert.deepEqual(
+      chatStatements(applied).map((s) => paramOf(s, 'id')),
+      ['e0', 'e1'],
+    );
+    assert.match(stdout(), /\[WARN\] live-chat budget reached \(10\/12 units\)/);
+    assert.match(stdout(), / chat=2\n/);
+  });
+
+  it('stops cleanly when the chat has ended (liveChatEnded)', async () => {
+    useRemoteEnv();
+    const pages = [
+      ...endlessChatPages(1),
+      apiErrorResponse(403, 'liveChatEnded', 'The live chat is no longer live.'),
+    ];
+    const { transport, calls } = chatTransport(pages);
+    const { writer, applied } = fakeWriter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      liveChat: true,
+      writer,
+      transport,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    assert.equal(chatCalls(calls).length, 2);
+    assert.deepEqual(
+      chatStatements(applied).map((s) => paramOf(s, 'id')),
+      ['e0'],
+    );
+    assert.match(stdout(), /\[chat\] live1: live chat ended/);
+    assert.match(stdout(), /\[chat\] live1 messages=1 polls=1 units=5/);
+  });
+
+  it('stops at the 5 h wall-clock cap measured by the injected clock', async () => {
+    useRemoteEnv();
+    const threeHours = 3 * 60 * 60 * 1000;
+    const { transport, calls } = chatTransport(endlessChatPages(10, threeHours));
+    const { writer } = fakeWriter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      liveChat: true,
+      writer,
+      transport,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    // Polls at 0 h and 3 h; at 6 h the cap has passed.
+    assert.equal(chatCalls(calls).length, 2);
+    assert.match(stdout(), /\[WARN\] live-chat wall-clock cap reached/);
+  });
+
+  it('keeps the flushed chat rows when the run quota aborts mid-capture (exit 2)', async () => {
+    useRemoteEnv();
+    const { transport } = chatTransport(endlessChatPages(10));
+    const { writer, applied } = fakeWriter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      liveChat: true,
+      writer,
+      transport,
+      // 5 for the main stages, 5 for the first poll; the second poll exceeds it.
+      quota: new QuotaCounter(12),
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 2);
+    assert.match(stderr(), /quota exhausted/);
+    assert.equal(applied.length, 2);
+    assert.deepEqual(
+      chatStatements(applied).map((s) => paramOf(s, 'id')),
+      ['e0'],
+    );
+  });
+
+  it('writes LiveChatMessages to the local SQLite Catalog, one batch per poll', async () => {
+    const { transport } = chatTransport();
+    // A recent clock, so the `_active` view does not redact the text.
+    const clock = fakeClock(Date.now());
+
+    const code = await runIngest({
+      channel: '@test',
+      dbPath,
+      liveChat: true,
+      transport,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    const db = await openCatalog(dbPath);
+    try {
+      assert.deepEqual(
+        await db.all(
+          'SELECT id, video_id, author, author_channel_id, text, offset_seconds ' +
+            'FROM live_chat_messages_active ORDER BY offset_seconds',
+        ),
+        [
+          {
+            id: 'm1',
+            video_id: 'live1',
+            author: 'alice',
+            author_channel_id: 'UC_alice',
+            text: 'Olá, Mundo!',
+            offset_seconds: 0,
+          },
+          {
+            id: 'm2',
+            video_id: 'live1',
+            author: 'bob',
+            author_channel_id: 'UC_bob',
+            text: 'Thanks a lot',
+            offset_seconds: 65,
+          },
+          {
+            id: 'm5',
+            video_id: 'live1',
+            author: 'erin',
+            author_channel_id: 'UC_erin',
+            text: 'at ten minutes',
+            offset_seconds: 600,
+          },
+        ],
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('reports chat_messages_written with done', async () => {
+    useRemoteEnv();
+    const { transport } = chatTransport();
+    const { writer } = fakeWriter();
+    const { writer: statusWriter, applied: statusApplied } = fakeWriter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      liveChat: true,
+      reportStatus: 'req-chat',
+      writer,
+      statusWriter,
+      transport,
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 0, stderr());
+    const done = statusApplied.at(-1)![0]!;
+    assert.match(done.sql, /status = 'done'/);
+    assert.match(done.sql, /chat_messages_written = \?/);
+    // videos, comments, replies, skipped, quota, chat messages.
+    assert.deepEqual((done.params ?? []).slice(0, 6), [2, 0, 0, 0, 15, 3]);
+  });
+
+  it('reports chat_messages_written with failed when capture had started', async () => {
+    useRemoteEnv();
+    const { transport } = chatTransport(endlessChatPages(10));
+    const { writer } = fakeWriter();
+    const { writer: statusWriter, applied: statusApplied } = fakeWriter();
+    const clock = fakeClock(CHAT_START_MS);
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      liveChat: true,
+      reportStatus: 'req-chat-2',
+      writer,
+      statusWriter,
+      transport,
+      quota: new QuotaCounter(12),
+      now: clock.now,
+      sleep: clock.sleep,
+    });
+
+    assert.equal(code, 2);
+    const failed = statusApplied.at(-1)![0]!;
+    assert.match(failed.sql, /status = 'failed'/);
+    assert.match(failed.sql, /quota_used = \?, chat_messages_written = \?/);
+    // error, updated_at, finished_at, quota_used, chat_messages_written, id.
+    assert.deepEqual((failed.params ?? []).slice(3, 5), [10, 1]);
+  });
+});
+
 describe('parseIngestArgs', () => {
   it('parses the channel, --remote, and a --report-status value', () => {
     assert.deepEqual(parseIngestArgs(['@test', '--remote', '--report-status', 'req-1']), {
@@ -1192,6 +1705,33 @@ describe('parseIngestArgs', () => {
       parseIngestArgs(['@test', '--report-status', 'req-4']).error,
       '--report-status requires --remote.',
     );
+  });
+
+  it('parses --live-chat and --live-chat-budget in both forms (F3b)', () => {
+    assert.deepEqual(parseIngestArgs(['@test', '--live-chat', '--live-chat-budget', '500']), {
+      channel: '@test',
+      verbose: false,
+      remote: false,
+      liveChat: true,
+      liveChatBudget: 500,
+    });
+    assert.equal(parseIngestArgs(['--live-chat-budget=42', '@test']).liveChatBudget, 42);
+  });
+
+  it('errors on a --live-chat-budget that is not a positive integer', () => {
+    for (const argv of [
+      ['@test', '--live-chat-budget'],
+      ['@test', '--live-chat-budget', '--remote'],
+      ['@test', '--live-chat-budget=0'],
+      ['@test', '--live-chat-budget', '2.5'],
+      ['@test', '--live-chat-budget=abc'],
+    ]) {
+      assert.equal(
+        parseIngestArgs(argv).error,
+        '--live-chat-budget requires a positive integer <units> value.',
+        argv.join(' '),
+      );
+    }
   });
 
   it('keeps the existing behavior of ignoring unknown flags', () => {

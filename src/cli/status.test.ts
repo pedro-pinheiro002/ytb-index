@@ -56,8 +56,10 @@ describe('createIngestStatusReporter', () => {
       videos: 12,
       comments: 345,
       replies: 67,
+      // F3b (#52): upcoming Broadcasts plus videos whose comments were not captured.
       skippedVideos: 2,
       quotaUsed: 890,
+      chatMessages: 31,
     });
 
     assert.equal(applied.length, 1);
@@ -68,9 +70,10 @@ describe('createIngestStatusReporter', () => {
     assert.match(statement!.sql, /replies_written = \?/);
     assert.match(statement!.sql, /skipped_videos = \?/);
     assert.match(statement!.sql, /quota_used = \?/);
+    assert.match(statement!.sql, /chat_messages_written = \?/);
     assert.match(statement!.sql, /updated_at = \?/);
     assert.match(statement!.sql, /finished_at = \?/);
-    assert.deepEqual(statement!.params, [12, 345, 67, 2, 890, FIXED_ISO, FIXED_ISO, 'req-2']);
+    assert.deepEqual(statement!.params, [12, 345, 67, 2, 890, 31, FIXED_ISO, FIXED_ISO, 'req-2']);
   });
 
   it('reports quota_used with failed when the run knows it', async () => {
@@ -82,7 +85,19 @@ describe('createIngestStatusReporter', () => {
     const [statement] = applied[0]!;
     assert.match(statement!.sql, /status = 'failed'/);
     assert.match(statement!.sql, /quota_used = \?/);
+    assert.doesNotMatch(statement!.sql, /chat_messages_written/);
     assert.deepEqual(statement!.params, ['boom', FIXED_ISO, FIXED_ISO, 42, 'req-8']);
+  });
+
+  it('reports chat_messages_written with failed when capture had started (F3b)', async () => {
+    const { writer, applied } = fakeWriter();
+    const reporter = createIngestStatusReporter({ requestId: 'req-10', writer, now: FIXED_NOW });
+
+    await reporter.failed('boom', { quotaUsed: 42, chatMessages: 7 });
+
+    const [statement] = applied[0]!;
+    assert.match(statement!.sql, /quota_used = \?, chat_messages_written = \?/);
+    assert.deepEqual(statement!.params, ['boom', FIXED_ISO, FIXED_ISO, 42, 7, 'req-10']);
   });
 
   it('leaves quota_used alone on a failed update without progress', async () => {
@@ -165,6 +180,7 @@ describe('createIngestStatusReporter', () => {
       replies: 0,
       skippedVideos: 0,
       quotaUsed: 0,
+      chatMessages: 0,
     });
     await reporter.failed('boom');
 
