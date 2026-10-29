@@ -17,9 +17,16 @@
  * Every value is bound through prepared statements, never string-interpolated.
  * Catalog reads live in `./catalog-reads.ts`; the schema lives in
  * `migrations/`.
+ *
+ * F3a (#49): the upserts also write the v2 columns of migration 0003
+ * (Broadcast kind/state/actual times, Reply `parent_id`, `author_channel_id`,
+ * `search_text`). The v2 record fields are optional, so the defaults live
+ * here: `'upload'`, `NULL`, `''`, and `search_text` derived with
+ * `normalizeSearchText` when a record does not carry it.
  */
 import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
 import type { Executor, Statement } from './executor.ts';
+import { normalizeSearchText } from './search-text.ts';
 // ---------------------------------------------------------------------------
 // Upserts
 // ---------------------------------------------------------------------------
@@ -49,9 +56,10 @@ export async function upsertChannel(executor: Executor, channel: Channel): Promi
 const UPSERT_VIDEO_SQL = `
   INSERT INTO videos (
     id, channel_id, title, description, published_at, thumbnail_url,
-    duration_iso8601, view_count, like_count, comment_count, fetched_at
+    duration_iso8601, view_count, like_count, comment_count, fetched_at,
+    kind, broadcast_state, actual_start_time, actual_end_time, search_text
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     channel_id = excluded.channel_id,
     title = excluded.title,
@@ -62,7 +70,12 @@ const UPSERT_VIDEO_SQL = `
     view_count = excluded.view_count,
     like_count = excluded.like_count,
     comment_count = excluded.comment_count,
-    fetched_at = excluded.fetched_at
+    fetched_at = excluded.fetched_at,
+    kind = excluded.kind,
+    broadcast_state = excluded.broadcast_state,
+    actual_start_time = excluded.actual_start_time,
+    actual_end_time = excluded.actual_end_time,
+    search_text = excluded.search_text
 `;
 
 function videoParams(video: VideoRecord): unknown[] {
@@ -78,6 +91,11 @@ function videoParams(video: VideoRecord): unknown[] {
     video.likeCount,
     video.commentCount,
     video.fetchedAt,
+    video.kind ?? 'upload',
+    video.broadcastState ?? null,
+    video.actualStartTime ?? null,
+    video.actualEndTime ?? null,
+    video.searchText ?? normalizeSearchText(`${video.title} ${video.description}`),
   ];
 }
 
@@ -93,9 +111,10 @@ export async function upsertVideos(executor: Executor, videos: VideoRecord[]): P
 const UPSERT_COMMENT_SQL = `
   INSERT INTO comments (
     id, video_id, channel_id, author, text, published_at,
-    like_count, has_anchors, fetched_at
+    like_count, has_anchors, fetched_at,
+    author_channel_id, parent_id, search_text
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     video_id = excluded.video_id,
     channel_id = excluded.channel_id,
@@ -104,7 +123,10 @@ const UPSERT_COMMENT_SQL = `
     published_at = excluded.published_at,
     like_count = excluded.like_count,
     has_anchors = excluded.has_anchors,
-    fetched_at = excluded.fetched_at
+    fetched_at = excluded.fetched_at,
+    author_channel_id = excluded.author_channel_id,
+    parent_id = excluded.parent_id,
+    search_text = excluded.search_text
 `;
 
 function commentParams(comment: CommentRecord): unknown[] {
@@ -118,14 +140,28 @@ function commentParams(comment: CommentRecord): unknown[] {
     comment.likeCount,
     comment.hasAnchors,
     comment.fetchedAt,
+    comment.authorChannelId ?? '',
+    comment.parentId ?? null,
+    comment.searchText ?? normalizeSearchText(comment.text),
   ];
 }
 
-function commentStatements(comments: CommentRecord[]): Statement[] {
-  return comments.map((comment) => ({ sql: UPSERT_COMMENT_SQL, params: commentParams(comment) }));
+/** A Reply has a parent; YouTube allows one level only (GLOSSARY.md). */
+function isReply(comment: CommentRecord): boolean {
+  return comment.parentId !== undefined && comment.parentId !== null;
 }
 
-/** Insert or overwrite every given comment in one atomic batch. */
+/**
+ * Upserts for `comments`, top-level CommentRecords first and Replies after
+ * them (each group in input order), so a Reply's `parent_id` foreign key
+ * always resolves, however a writer chunks the list.
+ */
+function commentStatements(comments: CommentRecord[]): Statement[] {
+  const ordered = [...comments.filter((comment) => !isReply(comment)), ...comments.filter(isReply)];
+  return ordered.map((comment) => ({ sql: UPSERT_COMMENT_SQL, params: commentParams(comment) }));
+}
+
+/** Insert or overwrite every given comment in one atomic batch, parents before Replies. */
 export async function upsertComments(executor: Executor, comments: CommentRecord[]): Promise<void> {
   await executor.batch(commentStatements(comments));
 }
@@ -169,7 +205,8 @@ export interface IngestRows {
 
 /**
  * Flatten one ingest run into a single statement list for `Executor.batch`.
- * Order is channels → videos → comments → anchors so foreign keys resolve;
+ * Order is channels → videos → top-level comments → Replies → anchors so
+ * foreign keys resolve;
  * the batch itself is atomic (ADR-0001's all-or-nothing catalog refresh).
  */
 export function ingestStatements({ channel, videos, comments, anchors }: IngestRows): Statement[] {

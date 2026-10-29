@@ -12,6 +12,10 @@
  *
  * Reporting is strictly best-effort: a failed update is logged as a warning
  * and never aborts the ingest (ADR-0005: repair is re-running the ingest).
+ *
+ * F3a (#49): `done` also reports `replies_written`, `skipped_videos` and
+ * `quota_used` (migration 0003), and `failed` reports `quota_used` when the
+ * caller knows it.
  */
 import type { D1RestWriter } from '../db/d1-http.ts';
 import type { Statement } from '../db/executor.ts';
@@ -21,18 +25,42 @@ export const STATUS_ERROR_MAX_CHARS = 500;
 
 /** Final row counts reported with the terminal `done` update. */
 export interface IngestStatusCounts {
+  /** VideoRecords written → `videos_written`. */
   videos: number;
+  /**
+   * Top-level CommentRecords written → `comments_written`. Replies are NOT
+   * included: they are counted apart in {@link IngestStatusCounts.replies},
+   * so the two columns add up to every CommentRecord of the run.
+   */
   comments: number;
+  /** Replies written → `replies_written`. */
+  replies: number;
+  /** Videos skipped and not stored (upcoming Broadcasts) → `skipped_videos`. */
+  skippedVideos: number;
+  /** Quota units the run spent → `quota_used`. */
+  quotaUsed: number;
+}
+
+/** Progress known when a run fails, reported with the terminal `failed` update. */
+export interface IngestFailureProgress {
+  /** Quota units spent before the failure → `quota_used`. */
+  quotaUsed: number;
 }
 
 /** Best-effort lifecycle updates for one `ingest_requests` row. */
 export interface IngestStatusReporter {
   /** `running` + the resolved YouTube channel id. */
   running(channelId: string): Promise<void>;
-  /** `done` + final `videos_written` / `comments_written`. */
+  /**
+   * `done` + final `videos_written` / `comments_written` (top-level only) /
+   * `replies_written` / `skipped_videos` / `quota_used`.
+   */
   complete(counts: IngestStatusCounts): Promise<void>;
-  /** `failed` + a truncated error message. */
-  failed(error: string): Promise<void>;
+  /**
+   * `failed` + a truncated error message, plus `quota_used` when `progress`
+   * is given (pre-start failures leave the column at its default).
+   */
+  failed(error: string, progress?: IngestFailureProgress): Promise<void>;
 }
 
 /** Options for {@link createIngestStatusReporter}. */
@@ -96,31 +124,44 @@ export function createIngestStatusReporter(
       ]);
     },
 
-    async complete({ videos, comments }: IngestStatusCounts): Promise<void> {
+    async complete(counts: IngestStatusCounts): Promise<void> {
       const finishedAt = now().toISOString();
       await report([
         {
           sql: `
             UPDATE ingest_requests
-            SET status = 'done', videos_written = ?, comments_written = ?,
+            SET status = 'done', videos_written = ?,
+                comments_written = ?, replies_written = ?, skipped_videos = ?, quota_used = ?,
                 updated_at = ?, finished_at = ?
             WHERE id = ?
           `,
-          params: [videos, comments, finishedAt, finishedAt, requestId],
+          params: [
+            counts.videos,
+            counts.comments,
+            counts.replies,
+            counts.skippedVideos,
+            counts.quotaUsed,
+            finishedAt,
+            finishedAt,
+            requestId,
+          ],
         },
       ]);
     },
 
-    async failed(error: string): Promise<void> {
+    async failed(error: string, progress?: IngestFailureProgress): Promise<void> {
       const finishedAt = now().toISOString();
+      const params: unknown[] = [truncateStatusError(error), finishedAt, finishedAt];
+      if (progress !== undefined) params.push(progress.quotaUsed);
+      params.push(requestId);
       await report([
         {
           sql: `
             UPDATE ingest_requests
-            SET status = 'failed', error = ?, updated_at = ?, finished_at = ?
+            SET status = 'failed', error = ?, updated_at = ?, finished_at = ?${progress !== undefined ? ', quota_used = ?' : ''}
             WHERE id = ?
           `,
-          params: [truncateStatusError(error), finishedAt, finishedAt, requestId],
+          params,
         },
       ]);
     },

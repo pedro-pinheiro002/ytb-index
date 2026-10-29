@@ -32,6 +32,10 @@
  *    env-configured HTTP writer).
  *  - `statusWriter` — inject a `D1RestWriter` for `--report-status` updates.
  *  - `now` — override the clock so `fetched_at` values are deterministic.
+ *
+ * F3a (#49): the summary line and the `done` report also carry Replies,
+ * skipped upcoming Broadcasts and quota used; `comments=` /
+ * `comments_written` count top-level CommentRecords only.
  */
 import 'dotenv/config';
 import { API_KEY_FAILURE_MESSAGES, validateApiKey } from '../yt/api-key.ts';
@@ -70,8 +74,12 @@ const QUOTA_WARN = '[WARN] quota ~8000/10000 units used';
 interface IngestSummary {
   channels: number;
   videos: number;
+  /** Top-level CommentRecords (F3a, #49: Replies are counted apart). */
   comments: number;
+  replies: number;
   anchors: number;
+  /** Upcoming Broadcasts left out of the Catalog. */
+  skippedVideos: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +202,9 @@ export async function runIngest(
   /** Print the spec error line, report `failed` best-effort, return the code. */
   async function handleFailure(err: unknown): Promise<number> {
     const code = reportIngestError(err);
-    await statusReporter?.failed(err instanceof Error ? err.message : String(err));
+    await statusReporter?.failed(err instanceof Error ? err.message : String(err), {
+      quotaUsed: quota.total,
+    });
     return code;
   }
 
@@ -298,7 +308,7 @@ export async function runIngest(
     // `running` is instrumentation only (ADR-0005): the run is live and the
     // channel id is resolved. Best-effort — a reporting failure never aborts.
     const buffer = createBufferingSink();
-    await runIngestStages(ctx, channelInput, defaultIngestStages, {
+    const state = await runIngestStages(ctx, channelInput, defaultIngestStages, {
       emit: async (batch) => {
         await buffer.emit(batch);
         if ('channel' in batch) await statusReporter?.running(batch.channel.id);
@@ -306,9 +316,12 @@ export async function runIngest(
     });
     const rows = buffer.rows();
     const { videos, comments, anchors } = rows;
+    const replies = comments.filter((comment) => (comment.parentId ?? null) !== null).length;
+    const topLevel = comments.length - replies;
+    const skippedVideos = state.skippedVideoIds?.length ?? 0;
 
-    // 10. Persist the whole run: channel → videos → comments → anchors (FK
-    // order). Locally this is one atomic batch (ADR-0001 all-or-nothing);
+    // 10. Persist the whole run: channel → videos → comments (top-level, then
+    // Replies) → anchors (FK order). Locally this is one atomic batch (ADR-0001 all-or-nothing);
     // remotely it is chunked, best-effort D1 HTTP calls (no documented
     // atomicity) that rely on the idempotent upserts + re-run for repair.
     const statements = ingestStatements(rows);
@@ -321,14 +334,22 @@ export async function runIngest(
     // Instrumentation only: final counts land with the terminal `done`
     // update, batched into one writer call. Best-effort, never throws.
     if (statusReporter !== undefined) {
-      await statusReporter.complete({ videos: videos.length, comments: comments.length });
+      await statusReporter.complete({
+        videos: videos.length,
+        comments: topLevel,
+        replies,
+        skippedVideos,
+        quotaUsed: quota.total,
+      });
     }
 
     return {
       channels: 1,
       videos: videos.length,
-      comments: comments.length,
+      comments: topLevel,
+      replies,
       anchors: anchors.length,
+      skippedVideos,
     };
   }
 
@@ -343,7 +364,8 @@ export async function runIngest(
     log('Done.');
     log(
       `channels=${summary.channels} videos=${summary.videos} comments=${summary.comments} ` +
-        `anchors=${summary.anchors} duration=${durationSeconds.toFixed(1)}s quota=${quota.total}`,
+        `anchors=${summary.anchors} duration=${durationSeconds.toFixed(1)}s quota=${quota.total} ` +
+        `replies=${summary.replies} skipped=${summary.skippedVideos}`,
     );
     return 0;
   } catch (err) {

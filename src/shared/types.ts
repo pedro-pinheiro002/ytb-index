@@ -12,7 +12,9 @@
  * - v2 (spec docs/spec/v2.md, F1 #47): Broadcast fields on `VideoRecord`,
  *   Reply fields on `CommentRecord`, `LiveChatMessage`, and the search
  *   contract (`SearchQuery`, `SearchHit`). New record fields are optional
- *   until every producer writes them.
+ *   until every producer writes them. F3a (#49): the Ingest now fills all of
+ *   them; they stay optional so hand-built fixtures keep compiling, and the
+ *   write model (`db/ingest-writes`) supplies the defaults.
  */
 
 /** One YouTube channel — one row in `channels`. */
@@ -66,6 +68,11 @@ export interface VideoRecord {
   actualStartTime?: string | null;
   /** ISO-8601 UTC; `liveStreamingDetails.actualEndTime`, once a Broadcast ends. */
   actualEndTime?: string | null;
+  /**
+   * Normalized `title + ' ' + description` (ADR-0010). Ingest always sets it
+   * (F3a, #49); when absent, the write model derives it.
+   */
+  searchText?: string;
 }
 
 /**
@@ -86,6 +93,11 @@ export interface CommentRecord {
   parentId?: string | null;
   /** Plain text; `textFormat=plainText` at fetch time. */
   text: string;
+  /**
+   * Normalized `text` (ADR-0010). Ingest always sets it (F3a, #49); when
+   * absent, the write model derives it.
+   */
+  searchText?: string;
   /** ISO-8601 UTC. */
   publishedAt: string;
   likeCount: number;
@@ -250,7 +262,7 @@ export interface IngestRequest {
   status: 'queued' | 'running' | 'done' | 'failed';
   /** Videos written so far (0 until the runner reports progress). */
   videosWritten: number;
-  /** Comments written so far. */
+  /** Top-level CommentRecords written so far (Replies are `repliesWritten`). */
   commentsWritten: number;
   /** Error message when status is `failed`. */
   error: string | null;
@@ -268,7 +280,7 @@ export interface IngestRequest {
   repliesWritten?: number;
   /** LiveChatMessages written so far. */
   chatMessagesWritten?: number;
-  /** Videos skipped (e.g. upcoming Broadcasts). */
+  /** Videos skipped and not stored (upcoming Broadcasts). */
   skippedVideos?: number;
   /** Quota units spent by the run so far. */
   quotaUsed?: number;
