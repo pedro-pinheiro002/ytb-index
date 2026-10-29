@@ -300,6 +300,12 @@ button, input, select { font: inherit; color: inherit; }
 .inline-form .text-field { flex: 1 1 280px; }
 .shape-error { color: var(--md-sys-color-error); font: var(--md-sys-typescale-body-small); display: none; }
 .operator-footer { display: flex; justify-content: flex-end; }
+.operator-key { display: grid; gap: 8px; }
+.operator-key label, .checkbox-row { font: var(--md-sys-typescale-body-medium); color: var(--md-sys-color-on-surface-variant); }
+.checkbox-row { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.key-verdict { font: var(--md-sys-typescale-body-small); min-height: 1em; margin: 0; }
+.key-verdict.is-ok { color: var(--md-sys-color-primary); }
+.key-verdict.is-error { color: var(--md-sys-color-error); }
 .status {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
   color: var(--md-sys-color-on-surface-variant);

@@ -16,12 +16,14 @@ describe('appConfigFromEnv', () => {
       GH_OWNER: 'owner',
       GH_REPO: 'repo',
       SENTRY_HOOK_SECRET: 'hook',
+      INGEST_SEAL_PUBLIC_KEY: '{"kty":"RSA"}',
     });
     assert.deepEqual(config.ingest, {
       operatorToken: 'op',
       dispatchPat: 'pat',
       ghOwner: 'owner',
       ghRepo: 'repo',
+      sealPublicKey: '{"kty":"RSA"}',
     });
     assert.deepEqual(config.agentHook, {
       hookSecret: 'hook',
@@ -30,6 +32,14 @@ describe('appConfigFromEnv', () => {
       ghRepo: 'repo',
       enabled: true,
     });
+  });
+
+  it('accepts INGEST_SEAL_PUBLIC_KEY as a JSON object var and passes it on as JSON text', () => {
+    const jwk = { kty: 'RSA', n: 'abc', e: 'AQAB' };
+    assert.equal(
+      appConfigFromEnv({ INGEST_SEAL_PUBLIC_KEY: jwk }).ingest.sealPublicKey,
+      JSON.stringify(jwk),
+    );
   });
 
   it('disables the agent hook only for AGENT_ENABLED="false"', () => {

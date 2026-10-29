@@ -93,6 +93,20 @@ pnpm exec wrangler secret put GH_DISPATCH_PAT   # fine-grained PAT, Contents: wr
 
 `GH_OWNER` / `GH_REPO` are plain `vars` in `wrangler.jsonc` (public info). Locally, `pnpm dev` reads the same names from `.env` — see [`.env.example`](.env.example).
 
+### Pay with your own key (OperatorKey)
+
+The operator panel can send your own YouTube Data API key (the OperatorKey) with a trigger, so the Ingest spends your Google Cloud project's quota instead of the repo's `YOUTUBE_API_KEY` ([ADR-0007](docs/adr/0007-operator-supplies-own-api-key.md)). "Check key" calls `POST /api/key/check` (operator token required), which makes one 1-unit `channels.list` call and reports `ok`, `invalid`, `quotaExceeded`, `apiNotEnabled`, `restricted` or `unavailable`. On trigger, the Worker checks the key again, seals it with RSA-OAEP-256 and dispatches only the ciphertext; the Actions runner unseals and masks it ([ADR-0008](docs/adr/0008-sealed-operator-key-to-actions-runner.md)). The key is never stored in D1 or printed.
+
+Generate the sealing key pair once (rotate by repeating both steps):
+
+```bash
+pnpm exec tsx scripts/gen-seal-keypair.ts
+# 1. public JWK  -> wrangler.jsonc vars.INGEST_SEAL_PUBLIC_KEY, then deploy
+# 2. private JWK -> gh secret set INGEST_SEAL_PRIVATE_KEY
+```
+
+While `INGEST_SEAL_PUBLIC_KEY` is empty, triggers that carry a key answer `503` (fail closed); triggers without one keep using `YOUTUBE_API_KEY`.
+
 ## Configuration
 
 | Env var | Required by | Notes |
@@ -102,6 +116,8 @@ pnpm exec wrangler secret put GH_DISPATCH_PAT   # fine-grained PAT, Contents: wr
 | `OPERATOR_TOKEN` | `POST /api/ingest` | Bearer token for the operator API. Worker secret in production; `.env` for `pnpm dev`. |
 | `GH_DISPATCH_PAT` | `POST /api/ingest` | Fine-grained PAT (Contents: write) for `repository_dispatch`. Worker secret; `.env` for `pnpm dev`. |
 | `GH_OWNER` / `GH_REPO` | `POST /api/ingest` | GitHub coordinates for the dispatch. Wrangler `vars` (public info); `.env` for `pnpm dev`. |
+| `INGEST_SEAL_PUBLIC_KEY` | `POST /api/ingest` with a key | Public RSA-OAEP-256 JWK the OperatorKey is sealed under. Wrangler `var`; empty disables OperatorKey triggers (503). |
+| `INGEST_SEALED_KEY` / `INGEST_SEAL_PRIVATE_KEY` | `pnpm ingest` | Sealed OperatorKey (`v1.…`) and the private JWK that opens it; when set, it replaces `YOUTUBE_API_KEY`. Set by the ingest workflow. |
 
 Validation happens at step 1 of the ingest pipeline, before CLI parsing, before the DB is opened. A bad key never burns quota. See [spec §8](docs/spec/v1.md#8-api-key-management).
 

@@ -116,6 +116,21 @@ describe('renderCatalog', () => {
     assert.ok(out.includes('12 videos / 340 comments'));
   });
 
+  it('renders the OperatorKey field, check/forget buttons and live-chat opt-in (F6 #51)', () => {
+    const out = renderCatalog(CHANNEL, [VIDEO]);
+    assert.ok(out.includes('id="operator-key"'), 'key field');
+    assert.ok(/id="operator-key"[^>]*type="password"/.test(out), 'the key field is masked');
+    assert.ok(out.includes('id="operator-key-check"') && out.includes('Check key'));
+    assert.ok(out.includes('id="operator-key-forget"') && out.includes('Forget key'));
+    assert.ok(out.includes('id="operator-key-verdict"'), 'inline verdict area');
+    assert.ok(/id="ingest-capture-live-chat"[^>]*type="checkbox"/.test(out));
+    assert.ok(out.includes('Capture live chat'));
+    assert.ok(out.includes("'/api/key/check'"), 'the panel script calls the key check');
+    for (const match of out.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+      assert.doesNotThrow(() => new Function(match[1] ?? ''), 'inline scripts parse');
+    }
+  });
+
   it('renders a row with thumbnail, title link, relative date, and summary', () => {
     const out = renderCatalog(CHANNEL, [VIDEO]);
     assert.ok(out.includes('alt="Hello World"'), 'thumbnail alt is the video title');

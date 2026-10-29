@@ -232,7 +232,7 @@ describe('POST /api/ingest', () => {
       assert.equal(headers.get('accept'), 'application/vnd.github+json');
       assert.deepEqual(JSON.parse(String(call?.init.body)), {
         event_type: 'ingest',
-        client_payload: { requestId: 'req-1', channel: '@MKBHD' },
+        client_payload: { requestId: 'req-1', channel: '@MKBHD', captureLiveChat: false },
       });
     } finally {
       db.close();
