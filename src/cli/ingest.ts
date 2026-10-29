@@ -4,9 +4,10 @@
  * One-shot run: validate the API key, parse the channel argument, collect
  * the Catalog rows through the Ingest pipeline (`../ingest/pipeline.ts`:
  * resolve the channel, page its uploads, enrich videos, fetch top-level
- * comments, detect `TimeAnchor`s), and persist everything. This file owns the
- * CLI concerns: env, quota and call logging, the write target, status
- * reporting, and exit codes. Default target is the local SQLite catalog (one atomic
+ * comments, detect `TimeAnchor`s), and persist everything. Since R1 (#45)
+ * the pipeline runs as stages into a buffering row sink
+ * (`../ingest/stages.ts`). This file owns the CLI concerns: env, quota and
+ * call logging, the write target, status reporting, and exit codes. Default target is the local SQLite catalog (one atomic
  * `Executor.batch`); `--remote` sends the same statements to the production D1
  * database over the D1 HTTP API instead (chunked, best-effort — ADR-0003).
  * `--report-status <requestId>` (remote-only) additionally advances the
@@ -39,12 +40,8 @@ import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { createD1RestWriter, type D1RestWriter } from '../db/d1-http.ts';
 import { ingestStatements } from '../db/queries.ts';
-import {
-  ChannelNotFoundError,
-  collectIngestRows,
-  isQuotaExceeded,
-  type PipelineContext,
-} from '../ingest/pipeline.ts';
+import { ChannelNotFoundError, defaultIngestStages, isQuotaExceeded } from '../ingest/pipeline.ts';
+import { createBufferingSink, runIngestStages, type PipelineContext } from '../ingest/stages.ts';
 import { createIngestStatusReporter, type IngestStatusReporter } from './status.ts';
 import type { ChannelInput } from '../shared/types.ts';
 
@@ -276,9 +273,10 @@ export async function runIngest(
   }
 
   /**
-   * Steps 4–10: collect every row through `src/ingest/pipeline.ts`, then
-   * write them. Every write is deferred to step 10 (one atomic batch locally,
-   * chunked best-effort calls remotely). Throws on any failure.
+   * Steps 4–10: run the default Ingest stages into a buffering row sink,
+   * then write its rows. Every write is deferred to step 10 (one atomic
+   * batch locally, chunked best-effort calls remotely). Throws on any
+   * failure.
    */
   async function runPipeline(): Promise<IngestSummary> {
     const ctx: PipelineContext = {
@@ -290,9 +288,14 @@ export async function runIngest(
     };
     // `running` is instrumentation only (ADR-0005): the run is live and the
     // channel id is resolved. Best-effort — a reporting failure never aborts.
-    const rows = await collectIngestRows(ctx, channelInput, async (channel) => {
-      await statusReporter?.running(channel.id);
+    const buffer = createBufferingSink();
+    await runIngestStages(ctx, channelInput, defaultIngestStages, {
+      emit: async (batch) => {
+        await buffer.emit(batch);
+        if ('channel' in batch) await statusReporter?.running(batch.channel.id);
+      },
     });
+    const rows = buffer.rows();
     const { videos, comments, anchors } = rows;
 
     // 10. Persist the whole run: channel → videos → comments → anchors (FK
