@@ -17,6 +17,7 @@ import { html } from 'hono/html';
 import { DEFAULT_SEARCH_KINDS, type SearchPage } from '../db/catalog-search.ts';
 import type { SearchHit, SearchHitKind, SearchSort } from '../shared/types.ts';
 import { matchRanges } from './highlight.ts';
+import { chatElementId, commentElementId, WATCH_URL } from './links.ts';
 import { emptyState, formatCount, formatTimestamp, icon, page, relativeDate } from './ssr.tsx';
 import type { Html } from './ssr.tsx';
 
@@ -59,8 +60,6 @@ const SORT_LABELS: Record<SearchSort, string> = {
   likes: 'Most liked',
 };
 
-const WATCH = 'https://www.youtube.com/watch?v=';
-
 /** Move `index` off the low half of a surrogate pair. */
 function codePointBoundary(text: string, index: number): number {
   const code = text.charCodeAt(index);
@@ -98,13 +97,12 @@ function highlightSnippet(text: string, terms: readonly string[]): Html {
 /** The hit's place in the app's video page. */
 function appHref(hit: SearchHit): string {
   const video = `/v/${encodeURIComponent(hit.videoId)}`;
-  const record = encodeURIComponent(hit.recordId);
   switch (hit.kind) {
     case 'comment':
     case 'reply':
-      return `${video}#c-${record}`;
+      return `${video}#${encodeURIComponent(commentElementId(hit.recordId))}`;
     case 'chat':
-      return `${video}#m-${record}`;
+      return `${video}#${encodeURIComponent(chatElementId(hit.recordId))}`;
     case 'video':
       return video;
   }
@@ -112,7 +110,7 @@ function appHref(hit: SearchHit): string {
 
 /** The hit's YouTube link: at the first anchor, the offset, or the comment. */
 function youtubeHref(hit: SearchHit): string {
-  const watch = `${WATCH}${encodeURIComponent(hit.videoId)}`;
+  const watch = `${WATCH_URL}${encodeURIComponent(hit.videoId)}`;
   const firstAnchor = hit.anchorSeconds[0];
   switch (hit.kind) {
     case 'comment':
@@ -141,7 +139,7 @@ function externalLink(href: string, label: Html | string, className = ''): Html 
 /** The per-anchor jump links of a comment or Reply hit. */
 function anchorLinks(hit: SearchHit): Html | string {
   if (hit.anchorSeconds.length === 0) return '';
-  const watch = `${WATCH}${encodeURIComponent(hit.videoId)}`;
+  const watch = `${WATCH_URL}${encodeURIComponent(hit.videoId)}`;
   return html`<p class="timestamps">
     Timestamps:
     ${hit.anchorSeconds.map(
