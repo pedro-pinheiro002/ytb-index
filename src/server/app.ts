@@ -27,8 +27,8 @@ export interface CreateAppOptions {
    */
   ingest?: IngestApiConfig | undefined;
   /**
-   * Repair-agent webhook config. Omitted in read-only contexts (tests, Node
-   * dev without a secret): `POST /api/agent-hook` then fails closed (503).
+   * Repair-agent webhook config. Omitted in read-only contexts (tests); with
+   * it but without `SENTRY_HOOK_SECRET`, `POST /api/agent-hook` fails closed (503).
    */
   agentHook?: AgentHookConfig | undefined;
 }

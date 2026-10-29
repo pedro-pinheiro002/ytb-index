@@ -9,14 +9,15 @@
  * `DB_PATH`.
  *
  * The server reads the catalog only; it never touches `src/yt` or the YouTube
- * API key (spec §6 / #11). The ingest API's operator token and GitHub PAT come
- * from `.env` locally (Worker secrets in production, ADR-0005).
+ * API key (spec §6 / #11). Route config comes from `.env` locally through the
+ * same `appConfigFromEnv` the Worker uses on its bindings (ADR-0005).
  */
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { pathToFileURL } from 'node:url';
 import { openCatalog } from '../db/sqlite.ts';
 import { createApp } from './app.ts';
+import { appConfigFromEnv } from './config.ts';
 
 /** Options for {@link start}. */
 export interface StartOptions {
@@ -33,12 +34,7 @@ export async function start({
 }: StartOptions = {}): Promise<void> {
   const app = await createApp({
     db: await openCatalog(dbPath),
-    ingest: {
-      operatorToken: process.env.OPERATOR_TOKEN,
-      dispatchPat: process.env.GH_DISPATCH_PAT,
-      ghOwner: process.env.GH_OWNER,
-      ghRepo: process.env.GH_REPO,
-    },
+    ...appConfigFromEnv(process.env),
   });
   serve({ fetch: app.fetch, port });
 }
