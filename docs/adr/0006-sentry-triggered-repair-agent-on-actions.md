@@ -4,7 +4,7 @@ A Sentry issue becomes a reviewed branch without a server: the Worker is wrapped
 
 ## Status
 
-accepted
+accepted — amended: the verifier is now the steps of `pnpm check` (typecheck, test, format:check, Worker bundle), the same gate as CI, and the model's style and boundary rules come from the `agent-rules` block of `AGENTS.md`. The rest of the decision is unchanged.
 
 ## Considered Options
 
