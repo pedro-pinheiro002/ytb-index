@@ -28,7 +28,10 @@ export interface Incident {
   files: FileContext[];
 }
 
-/** Instructions the model must follow. Kept stable so results are comparable. */
+/**
+ * Instructions the model must follow. Kept stable so results are comparable.
+ * The style and boundary rules mirror `AGENTS.md` (Conventions, Boundaries).
+ */
 export const SYSTEM_PROMPT = `You are a senior TypeScript engineer fixing a production bug in a small Cloudflare Workers project.
 
 You receive: a Sentry issue, the latest event's stack frames, and excerpts of the relevant source files.

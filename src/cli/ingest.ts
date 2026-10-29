@@ -16,7 +16,7 @@
  *
  * Sources of decisions:
  *  - `docs/spec/v1.md` §5 (ordered steps + error matrix + logging).
- *  - `.scratch/build-spec/issue.md` (module map, single seam, one transaction).
+ *  - build spec #12 (module map, single seam, one transaction).
  *  - `docs/adr/0005-fe-triggered-ingest-on-github-actions.md` (status row).
  *
  * Seams for tests:

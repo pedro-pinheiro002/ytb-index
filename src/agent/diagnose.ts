@@ -10,7 +10,7 @@
  *   3. Fetch the issue and its latest event from Sentry, then read the source
  *      around the in-app frames.
  *   4. Ask OpenCode Go for a unified diff, validate it against the `src/`
- *      allowlist, apply it, and verify with `pnpm typecheck && pnpm test`.
+ *      allowlist, apply it, and verify with the steps of `pnpm check`.
  *      One repair round is allowed, fed with the verifier output.
  *   5. On success: push `agent/fix-<short-id>` and open a **draft** PR.
  *      On failure: notify and exit non-zero.
@@ -95,8 +95,11 @@ export const defaultDeps: DiagnoseDeps = {
   error: (message, cause) => console.error(message, ...(cause === undefined ? [] : [cause])),
 };
 
-/** Verification commands the repository already defines. */
-const VERIFY_STEPS = ['typecheck', 'test'] as const;
+/**
+ * Verification commands the repository already defines: the steps of
+ * `pnpm check`, run one by one so a failure names its step.
+ */
+export const VERIFY_STEPS = ['typecheck', 'test', 'format:check', 'build:worker'] as const;
 
 /** Run the repository's own checks; output is fed back to the model on failure. */
 function verify(deps: DiagnoseDeps, repoRoot: string): { ok: boolean; output: string } {
