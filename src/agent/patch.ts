@@ -9,7 +9,7 @@
  * The rules encode what the agent is allowed to be: a bug-fixer for `src/`,
  * not a way to change CI, dependencies, or deployment configuration. A
  * prompt-injected issue still has to get past this allowlist, then past
- * `pnpm typecheck && pnpm test`, then past a human reviewing a draft PR.
+ * `pnpm check`, then past a human reviewing a draft PR.
  */
 import { isSourcePath } from './context.ts';
 

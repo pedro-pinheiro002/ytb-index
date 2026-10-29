@@ -23,8 +23,7 @@ See [`docs/spec/v1.md`](docs/spec/v1.md) for the full v1 specification and [`GLO
 
 ```bash
 pnpm install
-cp .env.example .env   # if present; otherwise just create .env
-echo 'YOUTUBE_API_KEY=AIza...' >> .env
+cp .env.example .env   # then set YOUTUBE_API_KEY=AIza...
 ```
 
 The API key is **only required for `pnpm ingest`**. The server boots without it.
@@ -110,14 +109,17 @@ Validation happens at step 1 of the ingest pipeline, before CLI parsing, before 
 
 ```
 src/
-├── server/   # Hono app, SSR routes (/, /v/:videoId)
+├── worker.ts # Cloudflare Worker entry (server app over the D1 binding)
+├── server/   # Hono app, SSR routes (/, /v/:videoId), operator + agent-hook APIs
 ├── yt/       # YouTube Data API v3 client + TimeAnchor detection + API-key validation
-├── db/       # SQLite driver, schema, queries
-├── cli/      # Ingest entrypoint (src/cli/ingest.ts)
+├── db/       # Executor interface, portable queries, SQLite / D1 / D1 HTTP drivers
+├── ingest/   # Ingest pipeline steps: YouTube responses → Catalog rows
+├── cli/      # Ingest entrypoint (src/cli/ingest.ts): env, quota, writes, exit codes
+├── agent/    # Sentry-triggered repair agent (ADR-0006), isolated from the rest
 └── shared/   # Cross-cutting types (Channel, VideoRecord, CommentRecord, TimeAnchor)
 ```
 
-Dependency arrows: `server → db → shared`, `cli → yt → shared`, `cli → db → shared`. `shared/` is the leaf.
+Dependency arrows: `worker → server → db → shared`, `cli → ingest → yt → shared`, `cli → db → shared`. `shared/` is the leaf. These boundaries are enforced by [`src/architecture.test.ts`](src/architecture.test.ts).
 
 The authoritative artifact for the SQLite schema is [`migrations/0001_init.sql`](migrations/0001_init.sql).
 
@@ -134,17 +136,17 @@ The authoritative artifact for the SQLite schema is [`migrations/0001_init.sql`]
 | `pnpm typecheck` | `tsc --noEmit` against the project config. |
 | `pnpm test` | Run `node --test` suites under `src/**/*.test.ts`. |
 | `pnpm format` / `pnpm format:check` | Prettier write / check. |
+| `pnpm build:worker` | Bundle the Worker without deploying (`wrangler deploy --dry-run`). |
+| `pnpm check` | typecheck + test + format:check + build:worker — the CI gate. |
 
 ## Development
 
 ```bash
 pnpm install
-pnpm typecheck
-pnpm test
-pnpm format:check
+pnpm check
 ```
 
-The repo uses Prettier 3 and no ESLint. Lint, typecheck, and tests are the only CI gates.
+The repo uses Prettier 3 and no ESLint. `pnpm check` is the only CI gate; module boundaries are tests (`src/architecture.test.ts`), not lint rules.
 
 Ingest seams for tests:
 

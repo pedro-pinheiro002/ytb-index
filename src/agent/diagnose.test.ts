@@ -10,7 +10,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentConfig, AgentPayload } from './config.ts';
 import { AgentConfigError } from './config.ts';
-import { diagnose, failureMessage, prBody, type DiagnoseDeps } from './diagnose.ts';
+import { readFileSync } from 'node:fs';
+import { diagnose, failureMessage, prBody, VERIFY_STEPS, type DiagnoseDeps } from './diagnose.ts';
 import type { TelegramOptions } from './notify.ts';
 import type { SentryEvent, SentryIssue } from './sentry.ts';
 
@@ -115,6 +116,7 @@ function harness(overrides: Partial<DiagnoseDeps> = {}) {
     fetchIssue: async () => ISSUE,
     fetchLatestEvent: async () => EVENT,
     collectContext: () => [],
+    readRepoRules: () => '- rule',
     complete: async () => {
       state.completions += 1;
       return {
@@ -421,5 +423,16 @@ describe('diagnose — model transport failures', () => {
     assert.equal(await diagnose({}, deps), 1);
     assert.equal(state.prs.length, 0);
     assert.match(state.notifications.at(-1) ?? '', /rate limited/);
+  });
+});
+
+describe('VERIFY_STEPS', () => {
+  it('matches `pnpm check`, so the agent verifies what CI verifies', () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+    ) as {
+      scripts: Record<string, string>;
+    };
+    assert.equal(pkg.scripts.check, VERIFY_STEPS.map((step) => `pnpm ${step}`).join(' && '));
   });
 });

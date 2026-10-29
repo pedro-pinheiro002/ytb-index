@@ -1,7 +1,7 @@
 /**
  * YouTube Data API v3 client (`yt/client`).
  *
- * Source of decisions: wayfinder #18 (T05) + build spec (.scratch/build-spec/issue.md).
+ * Source of decisions: wayfinder #18 (T05) + build spec #12.
  *
  * Design:
  *  - One seam: an injectable `transport` (`(url, init?) => Promise<Response>`).
