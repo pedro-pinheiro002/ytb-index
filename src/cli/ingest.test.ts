@@ -15,6 +15,8 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
+  CommentListResponse,
+  CommentResource,
   CommentThread,
   CommentThreadListResponse,
   PlaylistItemListResponse,
@@ -25,6 +27,7 @@ import { openCatalog } from '../db/sqlite.ts';
 import type { D1RestWriter } from '../db/d1-http.ts';
 import type { Statement } from '../db/executor.ts';
 import { API_KEY_FAILURE_MESSAGES } from '../yt/api-key.ts';
+import { QuotaCounter } from '../yt/quota.ts';
 import { parseIngestArgs, runIngest } from './ingest.ts';
 
 // A valid-shape key: `AIza` + 35 URL-safe chars.
@@ -124,6 +127,8 @@ interface FakeConfig {
   videos?: VideoResource[];
   /** Per-video comment response; a `Response` is served verbatim as an error. */
   comments?: Record<string, CommentThreadListResponse | Response>;
+  /** `comments.list` pages per `parentId`, served in order by `pageToken`. */
+  replies?: Record<string, CommentListResponse[]>;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -187,6 +192,16 @@ function makeTransport(config: FakeConfig): { transport: Transport; calls: strin
         throw new Error(`fake transport: no comment response for ${videoId}`);
       }
       return entry instanceof Response ? entry : jsonResponse(entry);
+    }
+
+    if (path.endsWith('/comments')) {
+      const parentId = parsed.searchParams.get('parentId') ?? '';
+      const pages = config.replies?.[parentId];
+      if (pages === undefined) throw new Error(`fake transport: no replies for ${parentId}`);
+      const token = parsed.searchParams.get('pageToken');
+      const page = pages[token === null ? 0 : Number(token)];
+      if (page === undefined) throw new Error(`fake transport: no reply page ${token}`);
+      return jsonResponse(page);
     }
 
     throw new Error(`fake transport: unexpected URL ${url}`);
@@ -552,9 +567,13 @@ describe('runIngest', () => {
     const done = statusApplied[1]![0]!;
     assert.match(done.sql, /status = 'done'/);
     assert.match(done.sql, /finished_at = \?/);
+    // videos, comments, replies, skipped_videos, quota_used (5 calls).
     assert.deepEqual(done.params, [
       2,
       2,
+      0,
+      0,
+      5,
       '2024-03-01T00:00:00.000Z',
       '2024-03-01T00:00:00.000Z',
       'req-1',
@@ -606,7 +625,10 @@ describe('runIngest', () => {
     assert.match(params[0] as string, /quota exceeded/i);
     assert.equal(params[1], '2024-03-01T00:00:00.000Z');
     assert.equal(params[2], '2024-03-01T00:00:00.000Z');
-    assert.equal(params[3], 'req-1');
+    // quota_used: channels + playlistItems + videos billed before the failure.
+    assert.match(failed.sql, /quota_used = \?/);
+    assert.equal(params[3], 3);
+    assert.equal(params[4], 'req-1');
   });
 
   it('--remote --report-status keeps the ingest running when status updates fail', async () => {
@@ -727,6 +749,353 @@ describe('runIngest', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// v2 fixtures: Broadcasts, Replies, authorChannelId, search_text (F3a, #49)
+// ---------------------------------------------------------------------------
+
+const V2_PLAYLIST: PlaylistItemListResponse = {
+  items: ['up1', 'bc1', 'soon1', 'off1'].map((videoId) => ({
+    id: `PL_${videoId}`,
+    snippet: {
+      title: videoId,
+      publishedAt: '2024-01-01T00:00:00Z',
+      resourceId: { videoId },
+    },
+  })),
+};
+
+function v2Video(
+  id: string,
+  title: string,
+  extra: Partial<Pick<VideoResource, 'liveStreamingDetails'>> & {
+    liveBroadcastContent?: 'none' | 'live' | 'upcoming';
+  } = {},
+): VideoResource {
+  return {
+    id,
+    snippet: {
+      title,
+      description: 'Ação, ao VIVO!',
+      publishedAt: '2024-01-01T00:00:00Z',
+      channelId: CHANNEL.id,
+      ...(extra.liveBroadcastContent !== undefined
+        ? { liveBroadcastContent: extra.liveBroadcastContent }
+        : {}),
+      thumbnails: {},
+    },
+    contentDetails: { duration: 'PT1M' },
+    statistics: { viewCount: '1', likeCount: '1', commentCount: '1' },
+    ...(extra.liveStreamingDetails !== undefined
+      ? { liveStreamingDetails: extra.liveStreamingDetails }
+      : {}),
+  };
+}
+
+const V2_VIDEOS: VideoResource[] = [
+  v2Video('up1', 'Plain Upload', { liveBroadcastContent: 'none' }),
+  v2Video('bc1', 'Ended Broadcast', {
+    liveBroadcastContent: 'none',
+    liveStreamingDetails: {
+      actualStartTime: '2024-01-05T10:00:00Z',
+      actualEndTime: '2024-01-05T12:00:00Z',
+    },
+  }),
+  v2Video('soon1', 'Upcoming Broadcast', {
+    liveBroadcastContent: 'upcoming',
+    liveStreamingDetails: { scheduledStartTime: '2024-12-01T00:00:00Z' },
+  }),
+  v2Video('off1', 'Comments Off'),
+];
+
+/** A comment resource; `author` doubles as the `UC_<author>` channel id unless `null`. */
+function v2Comment(
+  id: string,
+  author: string,
+  text: string,
+  parentId?: string,
+  authorChannelId: string | null = `UC_${author}`,
+): CommentResource {
+  return {
+    id,
+    snippet: {
+      authorDisplayName: author,
+      ...(authorChannelId !== null ? { authorChannelId: { value: authorChannelId } } : {}),
+      textOriginal: text,
+      publishedAt: '2024-02-01T00:00:00Z',
+      likeCount: 1,
+      ...(parentId !== undefined ? { parentId } : {}),
+    },
+  };
+}
+
+/** Fresh per run: a `Response` body can be read only once. */
+function v2Comments(): Record<string, CommentThreadListResponse | Response> {
+  return {
+    // Every Reply is embedded: no comments.list call.
+    up1: {
+      items: [
+        {
+          id: 'c1',
+          snippet: {
+            topLevelComment: v2Comment('c1', 'alice', 'Great part at 1:23!'),
+            totalReplyCount: 1,
+          },
+          replies: {
+            comments: [v2Comment('r1', 'bob', 'Agreed, at 2:00 too', 'c1')],
+          },
+        },
+      ],
+    },
+    // 3 Replies, 1 embedded: page comments.list (2 pages) and use those instead.
+    // The top-level author has no channel id (legacy account).
+    bc1: {
+      items: [
+        {
+          id: 'c2',
+          snippet: {
+            topLevelComment: v2Comment('c2', 'carol', 'Live was fun', undefined, null),
+            totalReplyCount: 3,
+          },
+          replies: { comments: [v2Comment('r2', 'dan', 'embedded only', 'c2')] },
+        },
+      ],
+    },
+    off1: apiErrorResponse(403, 'commentsDisabled', 'comments are disabled'),
+  };
+}
+
+const V2_REPLIES: Record<string, CommentListResponse[]> = {
+  c2: [
+    {
+      items: [v2Comment('r2', 'dan', 'Yes at 10:00', 'c2'), v2Comment('r3', 'erin', 'Café', 'c2')],
+      nextPageToken: '1',
+    },
+    // No `parentId` on the resource: the thread still names the parent.
+    { items: [v2Comment('r4', 'fay', 'same')] },
+  ],
+};
+
+function v2Transport(): { transport: Transport; calls: string[] } {
+  return makeTransport({
+    channel: CHANNEL,
+    playlistPages: [V2_PLAYLIST],
+    videos: V2_VIDEOS,
+    comments: v2Comments(),
+    replies: V2_REPLIES,
+  });
+}
+
+/** The bound value of column `name` in an INSERT statement. */
+function paramOf(statement: Statement, name: string): unknown {
+  const columns = /\(([^)]*)\)\s*VALUES/s
+    .exec(statement.sql)![1]!
+    .split(',')
+    .map((column) => column.trim());
+  const index = columns.indexOf(name);
+  assert.ok(index >= 0, `column ${name} not in ${statement.sql}`);
+  return (statement.params as unknown[])[index];
+}
+
+describe('runIngest v2: Broadcasts and Replies (F3a)', () => {
+  it('classifies Broadcasts, skips upcoming ones, pages Replies and bills quota', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport, calls } = v2Transport();
+    const { writer, applied } = fakeWriter();
+    const quota = new QuotaCounter();
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      writer,
+      transport,
+      quota,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 0, stderr());
+    // channels + playlistItems + videos + commentThreads ×2 (up1, bc1; the failed
+    // off1 call is not billed, as in v1) + comments.list ×2 (c2's Replies).
+    // Nothing at all for the upcoming Broadcast.
+    assert.equal(quota.total, 7);
+    assert.equal(calls.filter((url) => url.includes('videoId=soon1')).length, 0);
+    assert.equal(calls.filter((url) => new URL(url).pathname.endsWith('/comments')).length, 2);
+    assert.match(stdout(), /\[skip\] soon1: upcoming Broadcast/);
+    assert.match(stdout(), /\[skip\] off1: commentsDisabled/);
+
+    const statements = applied[0]!;
+    const videos = statements.filter((s) => /INSERT INTO videos/.test(s.sql));
+    assert.deepEqual(
+      videos.map((s) => [
+        paramOf(s, 'id'),
+        paramOf(s, 'kind'),
+        paramOf(s, 'broadcast_state'),
+        paramOf(s, 'actual_start_time'),
+        paramOf(s, 'actual_end_time'),
+        paramOf(s, 'search_text'),
+      ]),
+      [
+        ['up1', 'upload', null, null, null, 'plain upload acao ao vivo'],
+        [
+          'bc1',
+          'broadcast',
+          'ended',
+          '2024-01-05T10:00:00Z',
+          '2024-01-05T12:00:00Z',
+          'ended broadcast acao ao vivo',
+        ],
+        ['off1', 'upload', null, null, null, 'comments off acao ao vivo'],
+      ],
+    );
+
+    const comments = statements.filter((s) => /INSERT INTO comments/.test(s.sql));
+    assert.deepEqual(
+      comments.map((s) => [
+        paramOf(s, 'id'),
+        paramOf(s, 'parent_id'),
+        paramOf(s, 'author_channel_id'),
+        paramOf(s, 'search_text'),
+        paramOf(s, 'has_anchors'),
+      ]),
+      [
+        // Top-level CommentRecords first, then Replies (FK order).
+        ['c1', null, 'UC_alice', 'great part at 1 23', 1],
+        ['c2', null, '', 'live was fun', 0],
+        ['r1', 'c1', 'UC_bob', 'agreed at 2 00 too', 1],
+        ['r2', 'c2', 'UC_dan', 'yes at 10 00', 1],
+        ['r3', 'c2', 'UC_erin', 'cafe', 0],
+        ['r4', 'c2', 'UC_fay', 'same', 0],
+      ],
+    );
+    // Replies get TimeAnchor detection like top-level CommentRecords.
+    const anchors = statements.filter((s) => /INSERT INTO time_anchors/.test(s.sql));
+    assert.deepEqual(
+      anchors.map((s) => [paramOf(s, 'comment_id'), paramOf(s, 'seconds')]),
+      [
+        ['c1', 83],
+        ['r1', 120],
+        ['r2', 600],
+      ],
+    );
+    // Every comment statement precedes every anchor statement.
+    assert.ok(statements.indexOf(anchors[0]!) > statements.indexOf(comments.at(-1)!));
+
+    assert.match(
+      stdout(),
+      /channels=1 videos=3 comments=2 anchors=3 duration=\d+\.\ds quota=7 replies=4 skipped=1/,
+    );
+  });
+
+  it('persists Broadcasts and Replies into the local SQLite Catalog', async () => {
+    const { transport } = v2Transport();
+
+    const code = await runIngest({
+      channel: '@test',
+      dbPath,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 0, stderr());
+    const db = await openCatalog(dbPath);
+    try {
+      assert.deepEqual(
+        await db.all(
+          'SELECT id, kind, broadcast_state, actual_start_time, actual_end_time, search_text ' +
+            'FROM videos ORDER BY id',
+        ),
+        [
+          {
+            id: 'bc1',
+            kind: 'broadcast',
+            broadcast_state: 'ended',
+            actual_start_time: '2024-01-05T10:00:00Z',
+            actual_end_time: '2024-01-05T12:00:00Z',
+            search_text: 'ended broadcast acao ao vivo',
+          },
+          {
+            id: 'off1',
+            kind: 'upload',
+            broadcast_state: null,
+            actual_start_time: null,
+            actual_end_time: null,
+            search_text: 'comments off acao ao vivo',
+          },
+          {
+            id: 'up1',
+            kind: 'upload',
+            broadcast_state: null,
+            actual_start_time: null,
+            actual_end_time: null,
+            search_text: 'plain upload acao ao vivo',
+          },
+        ],
+      );
+      // The v2 columns read back through `comments_active`. FIXED_NOW is long
+      // past, so the view redacts search_text; the raw column holds it.
+      assert.deepEqual(
+        await db.all('SELECT id, parent_id, author_channel_id FROM comments_active ORDER BY id'),
+        [
+          { id: 'c1', parent_id: null, author_channel_id: 'UC_alice' },
+          { id: 'c2', parent_id: null, author_channel_id: '' },
+          { id: 'r1', parent_id: 'c1', author_channel_id: 'UC_bob' },
+          { id: 'r2', parent_id: 'c2', author_channel_id: 'UC_dan' },
+          { id: 'r3', parent_id: 'c2', author_channel_id: 'UC_erin' },
+          { id: 'r4', parent_id: 'c2', author_channel_id: 'UC_fay' },
+        ],
+      );
+      assert.deepEqual(
+        await db.all("SELECT id, search_text FROM comments WHERE id IN ('r3', 'c1') ORDER BY id"),
+        [
+          { id: 'c1', search_text: 'great part at 1 23' },
+          { id: 'r3', search_text: 'cafe' },
+        ],
+      );
+      assert.equal((await db.get<{ c: number }>('SELECT count(*) AS c FROM time_anchors'))?.c, 3);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('reports replies_written, skipped_videos and quota_used with done', async () => {
+    process.env['CLOUDFLARE_API_TOKEN'] = 'test-token';
+    process.env['CLOUDFLARE_ACCOUNT_ID'] = 'test-account';
+    process.env['D1_DATABASE_ID'] = 'test-db';
+    const { transport } = v2Transport();
+    const { writer } = fakeWriter();
+    const { writer: statusWriter, applied: statusApplied } = fakeWriter();
+
+    const code = await runIngest({
+      channel: '@test',
+      remote: true,
+      reportStatus: 'req-9',
+      writer,
+      statusWriter,
+      transport,
+      now: FIXED_NOW,
+    });
+
+    assert.equal(code, 0, stderr());
+    const done = statusApplied.at(-1)![0]!;
+    assert.match(done.sql, /status = 'done'/);
+    assert.match(
+      done.sql,
+      /comments_written = \?, replies_written = \?, skipped_videos = \?, quota_used = \?/,
+    );
+    // videos, comments (top-level only), replies, skipped, quota.
+    assert.deepEqual(done.params, [
+      3,
+      2,
+      4,
+      1,
+      7,
+      '2024-03-01T00:00:00.000Z',
+      '2024-03-01T00:00:00.000Z',
+      'req-9',
+    ]);
+  });
+});
 describe('parseIngestArgs', () => {
   it('parses the channel, --remote, and a --report-status value', () => {
     assert.deepEqual(parseIngestArgs(['@test', '--remote', '--report-status', 'req-1']), {

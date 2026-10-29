@@ -11,6 +11,9 @@
  * `docs/spec/v2.md` → Modules) plugs into the same seam without touching any
  * stage. The default v1 stage list lives next to its steps in
  * `./pipeline.ts`.
+ *
+ * F3a (#49): `client` is the single `YouTubeClient` (Replies via
+ * `listComments`), and the state also records skipped upcoming Broadcasts.
  */
 import type { YouTubeClient } from '../yt/client.ts';
 import type { IngestRows } from '../db/queries.ts';
@@ -59,8 +62,10 @@ export interface IngestState {
   channel?: Channel;
   /** IDs from the Channel's uploads playlist, in playlist order. */
   videoIds?: string[];
-  /** Enriched VideoRecords. */
+  /** Enriched VideoRecords (upcoming Broadcasts excluded). */
   videos?: VideoRecord[];
+  /** Upcoming Broadcasts the enrich stage skipped, not stored (F3a, #49). */
+  skippedVideoIds?: string[];
 }
 
 /** The context every stage of one Ingest shares. */

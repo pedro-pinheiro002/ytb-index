@@ -347,7 +347,7 @@ export interface ListCommentThreadsParams {
   maxResults?: number;
 }
 
-/** Arguments of {@link YouTubeV2Client.listComments}. */
+/** Arguments of {@link YouTubeClient.listComments}. */
 export interface ListCommentsParams {
   /** Top-level comment whose Replies to list. */
   parentId: string;
@@ -356,7 +356,7 @@ export interface ListCommentsParams {
   maxResults?: number;
 }
 
-/** Arguments of {@link YouTubeV2Client.listLiveChatMessages}. */
+/** Arguments of {@link YouTubeClient.listLiveChatMessages}. */
 export interface ListLiveChatMessagesParams {
   /** `videos.list` → `liveStreamingDetails.activeLiveChatId`. */
   liveChatId: string;
@@ -365,27 +365,29 @@ export interface ListLiveChatMessagesParams {
   maxResults?: number;
 }
 
-/** The v1 client surface: the four calls the v1 Ingest pipeline uses. */
+/**
+ * The YouTube Data API client surface: the four v1 calls plus Replies and
+ * live chat (F2, #48). F3a (#49) merged the former `YouTubeV2Client` into this
+ * single interface once every in-memory fake implemented the two new calls.
+ */
 export interface YouTubeClient {
   listChannel(params: ListChannelParams): Promise<ChannelListResponse>;
   listPlaylistItems(params: ListPlaylistItemsParams): Promise<PlaylistItemListResponse>;
   listVideos(params: ListVideosParams): Promise<VideoListResponse>;
   listCommentThreads(params: ListCommentThreadsParams): Promise<CommentThreadListResponse>;
-}
-
-/**
- * The full client (F2, #48): the v1 surface plus Replies and live chat.
- *
- * Kept as a separate interface so in-memory `YouTubeClient` fakes written for
- * v1 (e.g. in `src/ingest/pipeline.test.ts`) keep compiling; once every fake
- * implements the two new calls, the two interfaces can be merged.
- */
-export interface YouTubeV2Client extends YouTubeClient {
   /** `comments.list?parentId=…`: one page of Replies to a top-level comment. */
   listComments(params: ListCommentsParams): Promise<CommentListResponse>;
   /** `liveChatMessages.list`: one poll of an active live chat (ADR-0009). */
   listLiveChatMessages(params: ListLiveChatMessagesParams): Promise<LiveChatMessageListResponse>;
 }
+
+/**
+ * Former name of the full client, kept as an alias so code written against
+ * F2 keeps compiling.
+ *
+ * @deprecated Use {@link YouTubeClient}.
+ */
+export type YouTubeV2Client = YouTubeClient;
 
 /**
  * Quota units charged per call of each client method.
@@ -398,7 +400,7 @@ export interface YouTubeV2Client extends YouTubeClient {
  * (developers.google.com was unreachable from the build environment); only
  * third-party docs confirmed it. Re-check before relying on it for budgets.
  */
-export const QUOTA_COST: Readonly<Record<keyof YouTubeV2Client, number>> = Object.freeze({
+export const QUOTA_COST: Readonly<Record<keyof YouTubeClient, number>> = Object.freeze({
   listChannel: 1,
   listPlaylistItems: 1,
   listVideos: 1,
@@ -450,7 +452,7 @@ export interface YouTubeClientOptions {
 }
 
 /** Build the YouTube Data API client over the (retrying) `transport` seam. */
-export function createYouTubeClient(options: YouTubeClientOptions): YouTubeV2Client {
+export function createYouTubeClient(options: YouTubeClientOptions): YouTubeClient {
   const { apiKey } = options;
   const baseTransport: Transport =
     options.transport ?? ((url, init) => globalThis.fetch(url, init));
