@@ -11,4 +11,12 @@ export type {
   TimeAnchor,
   TimestampedComment,
   ChannelInput,
+  IngestRequest,
+  VideoKind,
+  BroadcastState,
+  LiveChatMessage,
+  SearchHitKind,
+  SearchSort,
+  SearchQuery,
+  SearchHit,
 } from './types.ts';
