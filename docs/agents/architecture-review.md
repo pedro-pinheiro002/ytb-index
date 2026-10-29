@@ -1,6 +1,6 @@
 # Arquitetura para agentes de codificação: diagnóstico e proposta
 
-Revisão de 2026-10-29. Objetivo: deixar o repositório mais seguro e barato de
+Revisão de 2026-10-29. **Status:** P0, P1 e P2 implementados no PR #39. Objetivo: deixar o repositório mais seguro e barato de
 modificar por agentes de IA (Claude Code, o repair agent de `src/agent`, outros
 que leem `AGENTS.md`), sem mudar o comportamento do produto.
 

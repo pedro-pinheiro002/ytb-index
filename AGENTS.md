@@ -77,6 +77,11 @@ set (`src/agent/rules.ts`): keep it self-contained.
   Change them only when the task is about them.
 - `.env` holds real credentials: never print, commit or copy it.
 
+In Claude Code, `.claude/settings.json` enforces part of this: a PreToolUse hook
+refuses Edit/Write on an existing migration or a `.env*` file (except
+`.env.example`), and a PostToolUse hook runs Prettier on every edited file.
+Shell commands are not covered, so the rules above still apply.
+
 ## Done means
 
 1. `pnpm check` passes.
