@@ -16,7 +16,14 @@ import type {
   TimeAnchor,
   VideoRecord,
 } from '../shared/types.ts';
-import { renderCatalog, renderVideo } from './ssr.tsx';
+import {
+  formatCount,
+  formatDuration,
+  keyMoments,
+  renderCatalog,
+  renderNotFound,
+  renderVideo,
+} from './ssr.tsx';
 
 const TODAY = new Date().toISOString();
 
@@ -132,6 +139,74 @@ describe('renderCatalog', () => {
     const out = renderCatalog(CHANNEL, [{ ...VIDEO, title: '' }]);
     assert.ok(out.includes('alt="Video thumbnail"'));
   });
+
+  it('inlines the stylesheet in a <style> element, not as page text', () => {
+    const out = renderCatalog(CHANNEL, [VIDEO]);
+    const style = /<style>([\s\S]*?)<\/style>/.exec(out);
+    assert.ok(style !== null, 'has a <style> element');
+    assert.ok(style[1]?.includes('--md-sys-color-primary'), 'carries the M3 tokens');
+    const body = out.slice(out.indexOf('<body>'));
+    assert.ok(!body.includes('--md-sys-color'), 'no CSS leaks into the body');
+  });
+
+  it('renders the "no videos" empty state for a channel without videos', () => {
+    const out = renderCatalog(CHANNEL, []);
+    assert.ok(visibleText(out).includes('No videos ingested.'));
+    assert.ok(visibleText(out).includes('Run pnpm ingest &lt;channel&gt; to populate.'));
+  });
+
+  it('shows the duration badge and the view count on a card', () => {
+    const out = renderCatalog(CHANNEL, [{ ...VIDEO, viewCount: 1_234_567 }]);
+    assert.ok(out.includes('<span class="duration">5:32</span>'));
+    assert.ok(out.includes('1.2M views'));
+  });
+});
+
+describe('formatDuration', () => {
+  it('formats ISO-8601 durations as player timestamps', () => {
+    assert.equal(formatDuration('PT5M32S'), '5:32');
+    assert.equal(formatDuration('PT45S'), '0:45');
+    assert.equal(formatDuration('PT1H2M3S'), '1:02:03');
+    assert.equal(formatDuration('P1DT1M'), '24:01:00');
+  });
+
+  it('returns an empty string for live streams and unparseable input', () => {
+    assert.equal(formatDuration('P0D'), '');
+    assert.equal(formatDuration('nonsense'), '');
+  });
+});
+
+describe('formatCount', () => {
+  it('abbreviates counts the way YouTube does', () => {
+    assert.equal(formatCount(950), '950');
+    assert.equal(formatCount(1_200), '1.2K');
+    assert.equal(formatCount(3_400_000), '3.4M');
+  });
+});
+
+describe('keyMoments', () => {
+  it('counts each offset once per comment and keeps the most cited, in playback order', () => {
+    const anchors: TimeAnchor[] = [
+      { commentId: 'a', seconds: 90, rawText: '1:30', charPosition: 0 },
+      { commentId: 'a', seconds: 90, rawText: '1:30', charPosition: 10 },
+      { commentId: 'b', seconds: 90, rawText: '1:30', charPosition: 0 },
+      { commentId: 'b', seconds: 30, rawText: '0:30', charPosition: 8 },
+      { commentId: 'c', seconds: 600, rawText: '10:00', charPosition: 0 },
+    ];
+    assert.deepEqual(keyMoments(anchors, 2), [
+      { seconds: 30, comments: 1 },
+      { seconds: 90, comments: 2 },
+    ]);
+  });
+});
+
+describe('renderNotFound', () => {
+  it('renders the shared 404 page with the message', () => {
+    const out = renderNotFound('Unknown channel.');
+    assert.ok(out.includes('404 Not Found'));
+    assert.ok(out.includes('Unknown channel.'));
+    assert.ok(out.includes('href="/"'));
+  });
 });
 
 describe('renderVideo', () => {
@@ -151,7 +226,11 @@ describe('renderVideo', () => {
 
   it('renders a TimestampedComment with the accent border and linked footer', () => {
     const out = renderVideo(VIDEO, [TIMESTAMPED_COMMENT], ANCHORS);
-    assert.ok(out.includes('border-left: 3px solid'), '3px left-border accent');
+    assert.ok(out.includes('class="comment timestamped"'), 'timestamped class');
+    assert.ok(
+      /\.comment\.timestamped \{[^}]*border-left: 3px solid/.test(out),
+      '3px left-border accent',
+    );
     assert.ok(
       visibleText(out).includes('Timestamps: 1:23 · 5:32 · 12:04'),
       'footer text with middle-dot separators',
@@ -193,6 +272,12 @@ describe('renderVideo', () => {
     // Not double-escaped: the timestamp is visible text, not an entity.
     assert.ok(visibleText(out).includes('jump to 5:32 for the best part'));
     assert.ok(!out.includes('&amp;t=332s'), 'href ampersand is not double-escaped');
+  });
+
+  it('renders the Key moments panel and the comment filter chips', () => {
+    const out = renderVideo(VIDEO, [TIMESTAMPED_COMMENT], ANCHORS);
+    assert.ok(out.includes('Key moments'));
+    assert.ok(out.includes('id="filter-timestamped"'));
   });
 
   it('omits the Timestamps footer for a comment without anchors', () => {
