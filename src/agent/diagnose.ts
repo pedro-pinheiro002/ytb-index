@@ -30,6 +30,7 @@ import {
   type AgentPayload,
 } from './config.ts';
 import { collectContext } from './context.ts';
+import { readRepoRules } from './rules.ts';
 import { resolveFrames } from './sourcemap.ts';
 import {
   applyDiff,
@@ -62,6 +63,7 @@ export interface DiagnoseDeps {
   fetchIssue: typeof fetchIssue;
   fetchLatestEvent: typeof fetchLatestEvent;
   collectContext: typeof collectContext;
+  readRepoRules: typeof readRepoRules;
   complete: typeof complete;
   run: typeof run;
   remoteBranchExists: typeof remoteBranchExists;
@@ -82,6 +84,7 @@ export const defaultDeps: DiagnoseDeps = {
   fetchIssue,
   fetchLatestEvent,
   collectContext,
+  readRepoRules,
   complete,
   run,
   remoteBranchExists,
@@ -299,6 +302,7 @@ export async function diagnose(
       issue,
       event: { ...event, frames },
       files,
+      rules: deps.readRepoRules(config.repoRoot),
     });
     if (!proposal.ok) {
       deps.error(`[agent] giving up: ${proposal.reason.slice(0, 800)}`);

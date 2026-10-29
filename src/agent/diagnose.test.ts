@@ -116,6 +116,7 @@ function harness(overrides: Partial<DiagnoseDeps> = {}) {
     fetchIssue: async () => ISSUE,
     fetchLatestEvent: async () => EVENT,
     collectContext: () => [],
+    readRepoRules: () => '- rule',
     complete: async () => {
       state.completions += 1;
       return {

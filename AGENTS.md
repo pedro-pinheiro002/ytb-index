@@ -30,6 +30,8 @@ with no network: inject the existing seams (`transport`, `now`, `writer`,
 | `src/agent/`    | Sentry-triggered repair agent run in Actions (ADR-0006)               |
 | `migrations/`   | D1/SQLite schema, applied in order                                    |
 
+<!-- agent-rules:start -->
+
 ## Boundaries (enforced by `src/architecture.test.ts`)
 
 - `shared` imports nothing; `yt` and `db` import only `shared`.
@@ -48,8 +50,6 @@ propose an ADR rather than editing the rule in the test.
 
 ## Conventions
 
-<!-- Mirrored in SYSTEM_PROMPT (src/agent/prompt.ts); keep both in sync. -->
-
 - Named exports; JSDoc on exported symbols; explicit return types on exported
   functions.
 - Each file opens with a header comment saying what it owns and which ADR or
@@ -59,6 +59,11 @@ propose an ADR rather than editing the rule in the test.
 - Use the glossary's terms in code, tests, issues and PRs (VideoRecord, not
   "video row"; Ingest, not "sync").
 - No new dependencies without a stated reason.
+
+<!-- agent-rules:end -->
+
+The block between the `agent-rules` markers is also the repair agent's rule
+set (`src/agent/rules.ts`): keep it self-contained.
 
 ## Danger zones
 
