@@ -16,6 +16,7 @@ import { agentHookRoute, type AgentHookConfig } from './api/agent-hook.ts';
 import { ingestApiRoute, type IngestApiConfig } from './api/ingest.ts';
 import { keyCheckRoute } from './api/key-check.ts';
 import { catalogRoute } from './routes/catalog.ts';
+import { searchRoute } from './routes/search.ts';
 import { videoRoute } from './routes/video.ts';
 
 /** Options for {@link createApp}. */
@@ -46,6 +47,7 @@ export async function createApp({ db, ingest, agentHook }: CreateAppOptions): Pr
   const app = new Hono();
   catalogRoute(app, db);
   videoRoute(app, db);
+  searchRoute(app, db);
   ingestApiRoute(app, db, ingest ?? {});
   keyCheckRoute(app, {
     operatorToken: ingest?.operatorToken,

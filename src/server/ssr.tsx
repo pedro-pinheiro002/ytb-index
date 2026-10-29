@@ -63,7 +63,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * `isEscaped` marker and is not double-escaped. Only the exported entry points
  * flatten to a plain `string`.
  */
-type Html = ReturnType<typeof html>;
+export type Html = ReturnType<typeof html>;
 
 /**
  * Human-friendly relative date (spec §6):
@@ -187,8 +187,11 @@ const ICON_PATHS = {
   bolt: 'M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z',
 } as const;
 
+/** The name of one of the UI's inline icons. */
+export type IconName = keyof typeof ICON_PATHS;
+
 /** An inline SVG icon; decorative unless the caller labels its container. */
-function icon(name: keyof typeof ICON_PATHS, small = false): Html {
+export function icon(name: IconName, small = false): Html {
   return html`<svg
     class="icon${small ? ' icon-sm' : ''}"
     viewBox="0 0 24 24"
@@ -218,8 +221,11 @@ const FAVICON =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 21'%3E%3Crect width='30' height='21' rx='6' fill='%23ff0033'/%3E%3Cpath d='M12 6v9l8-4.5z' fill='%23fff'/%3E%3C/svg%3E";
 
 /** What goes in the top app bar besides the brand. */
-interface ShellOptions {
-  /** Render the catalog search field. */
+export interface ShellOptions {
+  /**
+   * Render the top-bar search field: a GET form to `/search` (F5 #53) that
+   * also filters the catalog grid by title as the visitor types.
+   */
   search?: boolean;
   /** Extra controls on the right of the top app bar. */
   actions?: Html | string;
@@ -228,16 +234,17 @@ interface ShellOptions {
 }
 
 /** Wrap page `body` in the shared document shell: head, top app bar, snackbar. */
-function page(title: string, body: Html, options: ShellOptions = {}): string {
+export function page(title: string, body: Html, options: ShellOptions = {}): string {
   const search = options.search
-    ? html`<form class="search" role="search" onsubmit="return false">
+    ? html`<form class="search" role="search" method="get" action="/search">
         <label class="search-field">
           ${icon('search')}
-          <span class="sr-only">Search videos</span>
+          <span class="sr-only">Search the Catalog</span>
           <input
             id="video-search"
             type="search"
-            placeholder="Search videos"
+            name="q"
+            placeholder="Search"
             autocomplete="off"
             aria-keyshortcuts="/"
           />
@@ -764,7 +771,7 @@ function channelHeader(channel: Channel, videos: CatalogVideo[]): Html {
 }
 
 /** The empty-state block shared by every "nothing here yet" render. */
-function emptyState(iconName: keyof typeof ICON_PATHS, title: Html | string, hint?: Html): Html {
+export function emptyState(iconName: IconName, title: Html | string, hint?: Html): Html {
   return html`<div class="empty-state">
     ${icon(iconName)}
     <h2>${title}</h2>
