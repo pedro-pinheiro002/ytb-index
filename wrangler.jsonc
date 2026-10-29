@@ -36,6 +36,14 @@
     // Public by design; the private half is the INGEST_SEAL_PRIVATE_KEY repo
     // secret. Empty = OperatorKey triggers are disabled and fail closed (503);
     // triggers without a key still run on the repo YOUTUBE_API_KEY.
-    "INGEST_SEAL_PUBLIC_KEY": "",
+    // Generated 2026-10-29; rotate by replacing this and the repo secret together.
+    "INGEST_SEAL_PUBLIC_KEY": {
+      "key_ops": ["encrypt"],
+      "ext": true,
+      "alg": "RSA-OAEP-256",
+      "kty": "RSA",
+      "n": "ohEzhIB4GGmuPCBOhvqwu-U_khmXnWQiwhxmb06CaJ-HMA3oFxkeHg-aqfw9knIwOUxeciKGzSwI1rpbrCblBYFzUlnNiPp2vuxptTt2rgI_XLObyRvOPOvNYgl0Uj2fe9fJZmbJF_WUgQL0dpoRwfJ8Piu2qFpJMQDIHzJQ6LIwTwfXYw_wwlXUwkykyM1MpkmPZfjAY_VnH8xMxztN1xhIfgMjWmZLdw7ybeUNsszvl2vO5cjBMwdAy1-B9XGeMaUvpQiJ2jcyvCV1rdOMBiIQv9YsoudCvpbVnsXPu0p22FsEbOczJ5j-077UhMndn-5BGaCD0gbNtubpKhA8qw",
+      "e": "AQAB",
+    },
   },
 }
