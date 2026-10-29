@@ -9,11 +9,22 @@
  *
  * Moved out of `runIngest` (build spec #12) so each step can be read, changed
  * and tested on its own; log lines and call order are unchanged.
+ *
+ * R1 (#45): the steps are wrapped as {@link defaultIngestStages}, run by
+ * `runIngestStages` (`./stages.ts`) into a row sink; `collectIngestRows` is now
+ * that run into a buffering sink, with the same logs and call order.
  */
 import { detectAnchors } from '../yt/anchors.ts';
 import { ApiError } from '../yt/client.ts';
-import type { CommentResource, VideoResource, YouTubeClient } from '../yt/client.ts';
+import type { CommentResource, VideoResource } from '../yt/client.ts';
 import type { IngestRows } from '../db/queries.ts';
+import {
+  createBufferingSink,
+  requireState,
+  runIngestStages,
+  type IngestStage,
+  type PipelineContext,
+} from './stages.ts';
 import type {
   Channel,
   ChannelInput,
@@ -35,18 +46,7 @@ export class ChannelNotFoundError extends Error {
   }
 }
 
-/** What every step needs from its caller. */
-export interface PipelineContext {
-  client: YouTubeClient;
-  /** Run one API call; the caller bills quota and logs it. */
-  call: <T>(label: string, run: () => Promise<T>) => Promise<T>;
-  /** Progress line on stdout. */
-  log: (message: string) => void;
-  /** Log per-video comment counts and timings. */
-  verbose: boolean;
-  /** ISO timestamp stamped on every row of the run. */
-  fetchedAt: string;
-}
+export type { PipelineContext } from './stages.ts';
 
 /** A fetched top-level comment, paired with the video it belongs to. */
 export interface RawComment {
@@ -271,6 +271,57 @@ export function toCommentRows(
   return { comments, anchors };
 }
 
+// ---------------------------------------------------------------------------
+// Stages
+// ---------------------------------------------------------------------------
+
+/**
+ * The v1 Ingest, steps 4–9 as stages: resolve the Channel → list uploads →
+ * enrich videos → comments and TimeAnchors. Each logs its spec progress line
+ * and emits its rows (Channel, VideoRecords, CommentRecords + TimeAnchors).
+ */
+export const defaultIngestStages: readonly IngestStage[] = [
+  {
+    name: 'resolve-channel',
+    run: async (run) => {
+      run.log('[4/8] Resolving channel...');
+      const channel = await resolveChannel(run, run.input);
+      run.state.channel = channel;
+      await run.sink.emit({ channel });
+    },
+  },
+  {
+    name: 'list-uploads',
+    run: async (run) => {
+      const channel = requireState(run.state, 'channel');
+      run.log('[5/8] Fetching uploads playlist...');
+      run.state.videoIds = await listUploadIds(run, channel.uploadsPlaylistId);
+    },
+  },
+  {
+    name: 'enrich-videos',
+    run: async (run) => {
+      const channel = requireState(run.state, 'channel');
+      const videoIds = requireState(run.state, 'videoIds');
+      run.log(`[6/8] Enriching ${videoIds.length} videos...`);
+      const videos = await enrichVideos(run, videoIds, channel.id);
+      run.state.videos = videos;
+      await run.sink.emit({ videos });
+    },
+  },
+  {
+    name: 'comments',
+    run: async (run) => {
+      const channel = requireState(run.state, 'channel');
+      const videos = requireState(run.state, 'videos');
+      run.log(`[7/8] Fetching comments for ${videos.length} videos...`);
+      const rawComments = await fetchComments(run, videos);
+      run.log('[8/8] Detecting timestamps and persisting...');
+      await run.sink.emit(toCommentRows(rawComments, channel.id, run.fetchedAt));
+    },
+  },
+];
+
 /**
  * Steps 4–9 in order: every row of one Ingest, ready for
  * `ingestStatements`. `onChannel` runs once the Channel is resolved (the CLI
@@ -281,21 +332,12 @@ export async function collectIngestRows(
   input: ChannelInput,
   onChannel: (channel: Channel) => Promise<void> = async () => {},
 ): Promise<IngestRows> {
-  ctx.log('[4/8] Resolving channel...');
-  const channel = await resolveChannel(ctx, input);
-  await onChannel(channel);
-
-  ctx.log('[5/8] Fetching uploads playlist...');
-  const videoIds = await listUploadIds(ctx, channel.uploadsPlaylistId);
-
-  ctx.log(`[6/8] Enriching ${videoIds.length} videos...`);
-  const videos = await enrichVideos(ctx, videoIds, channel.id);
-
-  ctx.log(`[7/8] Fetching comments for ${videos.length} videos...`);
-  const rawComments = await fetchComments(ctx, videos);
-
-  ctx.log('[8/8] Detecting timestamps and persisting...');
-  const { comments, anchors } = toCommentRows(rawComments, channel.id, ctx.fetchedAt);
-
-  return { channel, videos, comments, anchors };
+  const buffer = createBufferingSink();
+  await runIngestStages(ctx, input, defaultIngestStages, {
+    emit: async (batch) => {
+      await buffer.emit(batch);
+      if ('channel' in batch) await onChannel(batch.channel);
+    },
+  });
+  return buffer.rows();
 }
