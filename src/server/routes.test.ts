@@ -10,6 +10,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Channel, CommentRecord, TimeAnchor, VideoRecord } from '../shared/types.ts';
+import type { Executor, Statement } from '../db/executor.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { upsertAnchors, upsertChannel, upsertComments, upsertVideos } from '../db/queries.ts';
 import { createApp } from './app.ts';
@@ -87,6 +88,48 @@ describe('server routes', () => {
       const body = await res.text();
       assert.ok(body.includes('Watch on YouTube'));
       assert.ok(body.includes('https://www.youtube.com/watch?v=vid-int&t=83s'));
+    } finally {
+      db.close();
+    }
+  });
+
+  it('GET /v/:videoId looks the video up by id, never scanning the whole Catalog', async () => {
+    const { db } = await seededApp();
+    try {
+      const executed: string[] = [];
+      const recording: Executor = {
+        all<T>(sql: string, params?: unknown[]): Promise<T[]> {
+          executed.push(sql);
+          return db.all<T>(sql, params);
+        },
+        get<T>(sql: string, params?: unknown[]): Promise<T | undefined> {
+          executed.push(sql);
+          return db.get<T>(sql, params);
+        },
+        run(sql: string, params?: unknown[]): Promise<number> {
+          executed.push(sql);
+          return db.run(sql, params);
+        },
+        batch(statements: Statement[]): Promise<void> {
+          executed.push(...statements.map((statement) => statement.sql));
+          return db.batch(statements);
+        },
+      };
+      const app = await createApp({ db: recording });
+
+      for (const videoId of ['vid-int', 'missing']) {
+        executed.length = 0;
+        const res = await app.request(`/v/${videoId}`);
+        assert.equal(res.status, videoId === 'missing' ? 404 : 200);
+        const videoReads = executed.filter((sql) => /\bFROM\s+videos\b/i.test(sql));
+        assert.deepEqual(
+          videoReads.filter((sql) => !/\bWHERE\b/i.test(sql)),
+          [],
+          'no unfiltered SELECT … FROM videos',
+        );
+        assert.equal(videoReads.length, 1, `exactly one videos read for ${videoId}`);
+        assert.match(videoReads[0] ?? '', /\bWHERE\s+id\s*=\s*\?/i);
+      }
     } finally {
       db.close();
     }

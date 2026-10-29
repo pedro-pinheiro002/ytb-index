@@ -17,7 +17,7 @@
  * `<repo>/migrations` path (the build mirrors `src/` under `dist/`). It is not
  * self-contained: a `dist/` copied away from the repo will not find it.
  *
- * No queries live here — see `./queries.ts`.
+ * No queries live here — see `./catalog-reads.ts` and `./ingest-writes.ts`.
  */
 import Database from 'better-sqlite3';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
