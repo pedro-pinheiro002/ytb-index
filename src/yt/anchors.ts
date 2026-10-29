@@ -32,14 +32,19 @@ const HMS_S_RE = /\b(\d{1,3}):([0-5]\d):([0-5]\d)\b/g;
 /**
  * `mm:ss` — sentinel-anchored. Each pattern captures the timestamp in group 1.
  * Groups are only used to locate the timestamp within `match[0]`.
+ *
+ * `(?!:\d)` after the group and `(?<!\d:)` before it stop a pattern from
+ * capturing the leading (`1:02` of `1:02:03`) or trailing (`42:00` of
+ * `0:42:00`) half of an `h:mm:ss` timestamp, which would otherwise survive
+ * de-duplication as a spurious second anchor.
  */
 const MMSS_PATTERNS = [
-  /\b(?:at|@)\s+(\d{1,3}:[0-5]\d)\b/gi,
-  /\b(?:jump|skip|go|fast[\s_-]?forward)\s+(?:to|until)\s+(\d{1,3}:[0-5]\d)\b/gi,
-  /\b(\d{1,3}:[0-5]\d)\s+(?:mark|onwards?|forward)\b/gi,
-  /\b(\d{1,3}:[0-5]\d)\s+is\s+(?:the\s+)?(?:best|key|real|important|funniest|weirdest|peak|main|part|moment|scene|climax|punchline|joke|highlight|where|when)\b/gi,
-  /\b(?:from|by)\s+(\d{1,3}:[0-5]\d)\b/gi,
-  /\b(\d{1,3}:[0-5]\d)\s+to\s+\d{1,3}:[0-5]\d\b/gi,
+  /\b(?:at|@)\s+(\d{1,3}:[0-5]\d)(?!:\d)\b/gi,
+  /\b(?:jump|skip|go|fast[\s_-]?forward)\s+(?:to|until)\s+(\d{1,3}:[0-5]\d)(?!:\d)\b/gi,
+  /(?<!\d:)\b(\d{1,3}:[0-5]\d)(?!:\d)\s+(?:mark|onwards?|forward)\b/gi,
+  /(?<!\d:)\b(\d{1,3}:[0-5]\d)(?!:\d)\s+is\s+(?:the\s+)?(?:best|key|real|important|funniest|weirdest|peak|main|part|moment|scene|climax|punchline|joke|highlight|where|when)\b/gi,
+  /\b(?:from|by)\s+(\d{1,3}:[0-5]\d)(?!:\d)\b/gi,
+  /(?<!\d:)\b(\d{1,3}:[0-5]\d)(?!:\d)\s+to\s+\d{1,3}:[0-5]\d\b/gi,
 ];
 
 function parseHmsS(match: RegExpExecArray): Anchor | null {

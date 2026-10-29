@@ -68,6 +68,19 @@ describe('detectAnchors', () => {
     }
   });
 
+  describe('sentinel before/after h:mm:ss yields exactly one anchor', () => {
+    const cases: Array<{ name: string; input: string; expected: Anchor[] }> = [
+      { name: 'at 1:02:03', input: 'at 1:02:03', expected: [a(3723, '1:02:03', 3)] },
+      { name: 'jump to 1:02:03', input: 'jump to 1:02:03', expected: [a(3723, '1:02:03', 8)] },
+      { name: '0:42:00 mark', input: '0:42:00 mark', expected: [a(2520, '0:42:00', 0)] },
+    ];
+    for (const tc of cases) {
+      it(tc.name, () => {
+        assert.deepEqual(detectAnchors(tc.input), tc.expected);
+      });
+    }
+  });
+
   describe('multiple anchors and de-duplication', () => {
     it('returns all anchors, sorted by char_position', () => {
       assert.deepEqual(detectAnchors('at 1:30 and jump to 2:45'), [
