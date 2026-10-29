@@ -25,6 +25,7 @@ import { openCatalog } from '../db/sqlite.ts';
 import type { D1RestWriter } from '../db/d1-http.ts';
 import type { Statement } from '../db/executor.ts';
 import { API_KEY_FAILURE_MESSAGES } from '../yt/api-key.ts';
+import { sealOperatorKey } from '../server/api/seal.ts';
 import { parseIngestArgs, runIngest } from './ingest.ts';
 
 // A valid-shape key: `AIza` + 35 URL-safe chars.
@@ -392,6 +393,57 @@ describe('runIngest', () => {
       stderr(),
       new RegExp(API_KEY_FAILURE_MESSAGES.malformed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
     );
+  });
+
+  it('uses the unsealed OperatorKey instead of YOUTUBE_API_KEY (F6 #51, ADR-0008)', async () => {
+    const operatorKey = `AIza${'o'.repeat(35)}`;
+    const pair = await crypto.subtle.generateKey(
+      {
+        name: 'RSA-OAEP',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['encrypt', 'decrypt'],
+    );
+    const publicJwk = JSON.stringify(await crypto.subtle.exportKey('jwk', pair.publicKey));
+    process.env['INGEST_SEALED_KEY'] = await sealOperatorKey(operatorKey, publicJwk);
+    process.env['INGEST_SEAL_PRIVATE_KEY'] = JSON.stringify(
+      await crypto.subtle.exportKey('jwk', pair.privateKey),
+    );
+    try {
+      const { transport, calls } = makeTransport({
+        channel: CHANNEL,
+        playlistPages: [PLAYLIST_PAGE],
+        videos: VIDEOS,
+        comments: COMMENTS,
+      });
+      const code = await runIngest({ channel: '@test', dbPath, transport, now: FIXED_NOW });
+
+      assert.equal(code, 0);
+      assert.ok(calls.length > 0);
+      for (const url of calls) {
+        assert.equal(new URL(url).searchParams.get('key'), operatorKey);
+      }
+      assert.ok(!stdout().includes(operatorKey) && !stderr().includes(operatorKey));
+    } finally {
+      delete process.env['INGEST_SEALED_KEY'];
+      delete process.env['INGEST_SEAL_PRIVATE_KEY'];
+    }
+  });
+
+  it('exits 1 before any API call when INGEST_SEALED_KEY has no private key', async () => {
+    process.env['INGEST_SEALED_KEY'] = 'v1.abc';
+    try {
+      const { transport, calls } = makeTransport({ channel: CHANNEL });
+      const code = await runIngest({ channel: '@test', dbPath, transport });
+      assert.equal(code, 1);
+      assert.match(stderr(), /INGEST_SEAL_PRIVATE_KEY is not/);
+      assert.equal(calls.length, 0);
+    } finally {
+      delete process.env['INGEST_SEALED_KEY'];
+    }
   });
 
   it('prints per-call lines on stdout when --verbose is set', async () => {

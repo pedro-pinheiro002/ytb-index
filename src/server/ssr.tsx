@@ -15,7 +15,8 @@
  *
  * All use Hono's `html` tagged-template helper, which auto-escapes every
  * interpolated value. Pages carry two small inline scripts at most (catalog
- * search, and operator token storage / trigger fetch / status polling);
+ * search, and operator token + OperatorKey storage / key check / trigger fetch
+ * / status polling, F6 #51);
  * everything else stays server-rendered and works without JavaScript.
  *
  * The functions are side-effect free and do not touch the database, so they
@@ -385,6 +386,36 @@ function heroTriggerForm(): Html {
 }
 
 /**
+ * OperatorKey controls (ADR-0007, F6 #51): an optional key field kept in
+ * this browser next to the operator token, a "Check key" probe, "Forget key",
+ * and the live-chat opt-in (ADR-0009) sent with the trigger.
+ */
+function operatorKeyBlock(): Html {
+  return html`<div class="operator-key" id="operator-key-block">
+    <label for="operator-key"
+      >Your YouTube Data API key (optional: the Ingest uses your quota)</label
+    >
+    <p class="inline-form">
+      <input
+        id="operator-key"
+        class="text-field"
+        type="password"
+        placeholder="AIza… (leave empty to use the repository key)"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button id="operator-key-check" class="btn btn-tonal" type="button">Check key</button>
+      <button id="operator-key-forget" class="btn btn-text" type="button">Forget key</button>
+    </p>
+    <p id="operator-key-verdict" class="key-verdict" role="status" aria-live="polite"></p>
+    <label class="checkbox-row" for="ingest-capture-live-chat">
+      <input id="ingest-capture-live-chat" type="checkbox" name="captureLiveChat" />
+      Capture live chat
+    </label>
+  </div>`;
+}
+
+/**
  * The operator surface (ADR-0005): a token form revealed from the top app
  * bar's key button while locked, and the trigger + status card once unlocked.
  */
@@ -414,7 +445,7 @@ function operatorSection(isEmpty: boolean, status: IngestRequest | null): Html {
           : html`<h2>${icon('bolt', true)}Trigger ingest</h2>
               ${compactTriggerForm()}`
       }
-      ${statusBlock(status)}
+      ${operatorKeyBlock()} ${statusBlock(status)}
       <div class="operator-footer">
         <button id="operator-forget" class="btn btn-text" type="button">
           ${icon('logout', true)}Forget token
@@ -469,6 +500,7 @@ function searchScript(): string {
 function operatorScript(): string {
   return `(function() {
   var STORAGE_KEY = 'ytb_index_operator_token';
+  var KEY_STORAGE_KEY = 'ytb_index_operator_key';
   var locked = document.getElementById('operator-locked');
   var unlocked = document.getElementById('operator-unlocked');
   var tokenForm = document.getElementById('operator-token-form');
@@ -481,10 +513,33 @@ function operatorScript(): string {
   var shapeError = document.getElementById('ingest-shape-error');
   var channelSwitcher = document.getElementById('channel-switcher');
   var snackbar = document.getElementById('snackbar');
+  var keyInput = document.getElementById('operator-key');
+  var keyCheckBtn = document.getElementById('operator-key-check');
+  var keyForgetBtn = document.getElementById('operator-key-forget');
+  var keyVerdict = document.getElementById('operator-key-verdict');
+  var liveChatBox = document.getElementById('ingest-capture-live-chat');
   var pollTimer = null;
   var snackTimer = null;
 
-  function hasToken() { return !!localStorage.getItem(STORAGE_KEY); }
+  // Storage can throw (private mode, blocked site data): treat it as empty.
+  function storeGet(name) { try { return localStorage.getItem(name); } catch (e) { return null; } }
+  function storeSet(name, value) { try { localStorage.setItem(name, value); } catch (e) {} }
+  function storeRemove(name) { try { localStorage.removeItem(name); } catch (e) {} }
+
+  function hasToken() { return !!storeGet(STORAGE_KEY); }
+
+  // The OperatorKey (ADR-0007): the typed value wins over the stored one.
+  function currentKey() {
+    var typed = keyInput ? keyInput.value.trim() : '';
+    return typed || storeGet(KEY_STORAGE_KEY) || '';
+  }
+
+  function showVerdict(message, ok) {
+    if (!keyVerdict) return;
+    keyVerdict.textContent = message || '';
+    keyVerdict.classList.toggle('is-ok', ok === true);
+    keyVerdict.classList.toggle('is-error', ok === false);
+  }
 
   function notify(message) {
     if (!snackbar) return;
@@ -562,7 +617,7 @@ function operatorScript(): string {
   function unlock() {
     var value = tokenInput.value.trim();
     if (value) {
-      localStorage.setItem(STORAGE_KEY, value);
+      storeSet(STORAGE_KEY, value);
       setOperatorVisible(true);
       startPolling();
       notify('Operator tools unlocked.');
@@ -578,12 +633,53 @@ function operatorScript(): string {
 
   if (forgetBtn) {
     forgetBtn.addEventListener('click', function() {
-      localStorage.removeItem(STORAGE_KEY);
+      storeRemove(STORAGE_KEY);
+      storeRemove(KEY_STORAGE_KEY);
+      if (keyInput) keyInput.value = '';
+      showVerdict('');
       setOperatorVisible(false);
       if (tokenForm) tokenForm.style.display = 'none';
       if (revealBtn) revealBtn.setAttribute('aria-pressed', 'false');
       if (tokenInput) tokenInput.value = '';
       notify('Operator token forgotten.');
+    });
+  }
+
+  if (keyInput) keyInput.value = storeGet(KEY_STORAGE_KEY) || '';
+
+  if (keyCheckBtn && keyInput) {
+    keyCheckBtn.addEventListener('click', async function() {
+      var key = keyInput.value.trim();
+      var token = storeGet(STORAGE_KEY);
+      if (!key) { showVerdict('Paste a YouTube Data API key first.', false); return; }
+      if (!token) return;
+      showVerdict('Checking key...');
+      try {
+        var res = await fetch('/api/key/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify({ key: key })
+        });
+        if (res.status === 401) { showVerdict('Invalid operator token.', false); return; }
+        if (!res.ok) { showVerdict('Key check failed: ' + res.status, false); return; }
+        var verdict = await res.json();
+        if (verdict.ok) {
+          storeSet(KEY_STORAGE_KEY, key);
+          showVerdict('Key works. Ingests from this browser will use your quota.', true);
+        } else {
+          showVerdict(verdict.message || 'Key refused.', false);
+        }
+      } catch (err) {
+        showVerdict('Network error: ' + (err && err.message ? err.message : err), false);
+      }
+    });
+  }
+
+  if (keyForgetBtn) {
+    keyForgetBtn.addEventListener('click', function() {
+      storeRemove(KEY_STORAGE_KEY);
+      if (keyInput) keyInput.value = '';
+      showVerdict('Key forgotten. Ingests will use the repository key.');
     });
   }
 
@@ -596,15 +692,25 @@ function operatorScript(): string {
         return;
       }
       if (shapeError) shapeError.style.display = 'none';
-      var token = localStorage.getItem(STORAGE_KEY);
+      var token = storeGet(STORAGE_KEY);
       if (!token) return;
+      var payload = { channel: value, captureLiveChat: !!(liveChatBox && liveChatBox.checked) };
+      var key = currentKey();
+      if (key) payload.key = key;
       try {
         var res = await fetch('/api/ingest', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-          body: JSON.stringify({ channel: value })
+          body: JSON.stringify(payload)
         });
         if (res.status === 401) { notify('Invalid operator token.'); return; }
+        if (res.status === 422 || res.status === 503) {
+          var refusal = await res.json().catch(function() { return {}; });
+          var message = refusal.message || refusal.error || ('Ingest request failed: ' + res.status);
+          showVerdict(message, false);
+          notify(message);
+          return;
+        }
         if (res.status === 409) {
           var body = await res.json().catch(function() { return {}; });
           notify('An ingest is already running for this channel. Request: ' + (body.requestId || 'unknown'));
@@ -613,7 +719,8 @@ function operatorScript(): string {
         }
         if (!res.ok) { notify('Ingest request failed: ' + res.status); return; }
         channelInput.value = '';
-        notify('Ingest queued for ' + value + '.');
+        if (key) storeSet(KEY_STORAGE_KEY, key);
+        notify('Ingest queued for ' + value + (key ? ' with your key.' : '.'));
         startPolling();
       } catch (err) {
         notify('Network error: ' + (err && err.message ? err.message : err));

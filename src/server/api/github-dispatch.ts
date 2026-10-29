@@ -3,7 +3,9 @@
  *
  * Fires the one event that wakes the ingest workflow on GitHub Actions
  * (ADR-0005): `event_type: "ingest"` with the IngestRequest id and the raw
- * channel input in `client_payload`. The PAT is a Worker secret scoped to
+ * channel input in `client_payload`, plus (F6 #51) the sealed OperatorKey
+ * when one was supplied (ADR-0008: ciphertext only, never the plaintext key)
+ * and the live-chat opt-in (ADR-0009). The PAT is a Worker secret scoped to
  * Contents: write on this one repo; the owner/repo coordinates are plain
  * `vars` (public info).
  *
@@ -26,6 +28,10 @@ export interface DispatchIngestOptions {
   requestId: string;
   /** The raw operator channel input, verbatim. */
   channel: string;
+  /** The sealed OperatorKey (`v1.…`, ADR-0008); omitted when the repo key pays. */
+  sealedKey?: string | undefined;
+  /** Whether the run captures LiveChatMessages of on-air Broadcasts (ADR-0009). */
+  captureLiveChat?: boolean | undefined;
   /** Injectable transport; defaults to `globalThis.fetch`. */
   transport?: DispatchTransport | undefined;
 }
@@ -37,7 +43,8 @@ export interface DispatchIngestOptions {
  * error, or missing configuration — callers mark the IngestRequest `failed`.
  */
 export async function dispatchIngest(options: DispatchIngestOptions): Promise<void> {
-  const { owner, repo, pat, requestId, channel } = options;
+  const { owner, repo, pat, requestId, channel, sealedKey } = options;
+  const captureLiveChat = options.captureLiveChat ?? false;
   if (owner === '' || repo === '' || pat === '') {
     throw new Error('repository_dispatch is not configured (GH_OWNER, GH_REPO, GH_DISPATCH_PAT)');
   }
@@ -57,7 +64,12 @@ export async function dispatchIngest(options: DispatchIngestOptions): Promise<vo
       },
       body: JSON.stringify({
         event_type: 'ingest',
-        client_payload: { requestId, channel },
+        client_payload: {
+          requestId,
+          channel,
+          ...(sealedKey !== undefined ? { sealedKey } : {}),
+          captureLiveChat,
+        },
       }),
     },
   );

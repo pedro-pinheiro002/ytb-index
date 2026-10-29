@@ -21,6 +21,8 @@
  *  - `docs/spec/v1.md` §5 (ordered steps + error matrix + logging).
  *  - build spec #12 (module map, single seam, one transaction).
  *  - `docs/adr/0005-fe-triggered-ingest-on-github-actions.md` (status row).
+ *  - `docs/adr/0008-sealed-operator-key-to-actions-runner.md` (F6 #51: a
+ *    sealed OperatorKey in `INGEST_SEALED_KEY` replaces `YOUTUBE_API_KEY`).
  *
  * Seams for tests:
  *  - `transport` — the same `(url, init?) => Promise<Response>` seam the
@@ -43,10 +45,10 @@ import { ingestStatements } from '../db/queries.ts';
 import { ChannelNotFoundError, defaultIngestStages, isQuotaExceeded } from '../ingest/pipeline.ts';
 import { createBufferingSink, runIngestStages, type PipelineContext } from '../ingest/stages.ts';
 import { createIngestStatusReporter, type IngestStatusReporter } from './status.ts';
+import { resolveIngestApiKey } from './unseal.ts';
 import type { ChannelInput } from '../shared/types.ts';
 
 const DEFAULT_DB_PATH = './catalog.sqlite';
-const DEFAULT_API_KEY_ENV = 'YOUTUBE_API_KEY';
 /** Environment variables required by `--remote` (D1 HTTP API, ADR-0003). */
 const REMOTE_ENV_VARS = [
   'CLOUDFLARE_API_TOKEN',
@@ -198,7 +200,14 @@ export async function runIngest(
 
   // 1. Validate the API key — cheapest possible fail, before any I/O.
   log('[1/8] Validating API key...');
-  const key = process.env[DEFAULT_API_KEY_ENV];
+  // F6 (#51, ADR-0008): a sealed OperatorKey from the dispatch, when present,
+  // replaces the repo `YOUTUBE_API_KEY`. Never logged.
+  const resolvedKey = await resolveIngestApiKey(process.env);
+  if (!resolvedKey.ok) {
+    error(resolvedKey.message);
+    return await fail(resolvedKey.message, 1);
+  }
+  const key = resolvedKey.key;
   const keyResult = validateApiKey(key);
   if (!keyResult.ok) {
     const message = API_KEY_FAILURE_MESSAGES[keyResult.reason];

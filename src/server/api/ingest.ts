@@ -9,7 +9,17 @@
  *   3. Enforce one active IngestRequest per `channel_key`
  *      (queued|running) -> `409 { requestId }` with the existing request's id.
  *   4. Insert a `queued` row and fire a GitHub `repository_dispatch`
- *      (`./github-dispatch.ts`) carrying `{ requestId, channel }`.
+ *      (`./github-dispatch.ts`) carrying `{ requestId, channel,
+ *      sealedKey?, captureLiveChat }`.
+ *
+ *   F6 (#51, ADR-0007/0008): the body is `{ channel, key?, captureLiveChat? }`.
+ *   With a `key` (an OperatorKey) the route fails closed with `503` when
+ *   `INGEST_SEAL_PUBLIC_KEY` is not configured, runs the same check as
+ *   `POST /api/key/check` (refusal -> `422 { reason, message }`), seals the
+ *   key (`./seal.ts`) and records `key_source = 'operator'`. No IngestRequest
+ *   row is created on a 503 or 422. Without a key the repo `YOUTUBE_API_KEY`
+ *   pays (`key_source = 'repo'`). The plaintext key is never stored, logged
+ *   or dispatched.
  *   5. Dispatch failure -> row marked `failed` (error: "dispatch failed"),
  *      response `502`; success -> `202 { requestId }`.
  *
@@ -18,7 +28,7 @@
  * updatedAt }`. When no request exists it answers **`204 No Content`** (no
  * body); callers treat 204 as "nothing yet".
  *
- * The module only uses runtime globals (fetch, TextEncoder, crypto.randomUUID)
+ * The module only uses runtime globals (fetch, crypto.randomUUID, crypto.subtle)
  * plus portable SQL through the `Executor`, so it bundles for Workers.
  */
 import type { Hono } from 'hono';
@@ -26,6 +36,9 @@ import type { Executor } from '../../db/executor.ts';
 import { loadLatestIngestStatus } from '../data.ts';
 import { normalizeChannelInput } from './channel-input.ts';
 import { dispatchIngest, type DispatchTransport } from './github-dispatch.ts';
+import { checkOperatorKey, type KeyCheckTransport } from './key-check.ts';
+import { isOperatorAuthorized } from './operator-auth.ts';
+import { sealOperatorKey } from './seal.ts';
 
 /** Configuration for the ingest API; all fields optional (fail closed). */
 export interface IngestApiConfig {
@@ -39,6 +52,14 @@ export interface IngestApiConfig {
   ghRepo?: string | undefined;
   /** Injectable dispatch transport; defaults to `globalThis.fetch`. */
   transport?: DispatchTransport | undefined;
+  /**
+   * Public RSA-OAEP JWK (JSON text) the OperatorKey is sealed under
+   * (`INGEST_SEAL_PUBLIC_KEY`, Worker var, ADR-0008). Missing/empty: a
+   * trigger carrying a key fails closed with `503`.
+   */
+  sealPublicKey?: string | undefined;
+  /** Injectable transport for the OperatorKey probe; defaults to `globalThis.fetch`. */
+  keyCheckTransport?: KeyCheckTransport | undefined;
   /** Injectable clock for deterministic tests. */
   now?: (() => Date) | undefined;
   /** Injectable id generator for deterministic tests. */
@@ -71,9 +92,10 @@ const RECLAIM_STALE_REQUESTS_SQL = `
 const INSERT_REQUEST_SQL = `
   INSERT INTO ingest_requests (
     id, channel_input, channel_key, channel_id, status,
-    videos_written, comments_written, error, created_at, updated_at, finished_at
+    videos_written, comments_written, error, created_at, updated_at, finished_at,
+    key_source, capture_live_chat
   )
-  VALUES (?, ?, ?, NULL, 'queued', 0, 0, NULL, ?, ?, NULL)
+  VALUES (?, ?, ?, NULL, 'queued', 0, 0, NULL, ?, ?, NULL, ?, ?)
 `;
 
 const MARK_REQUEST_FAILED_SQL = `
@@ -81,39 +103,6 @@ const MARK_REQUEST_FAILED_SQL = `
   SET status = 'failed', error = ?, updated_at = ?, finished_at = ?
   WHERE id = ?
 `;
-
-/**
- * Constant-time string equality: every byte pair is folded into one
- * accumulator and the loop always runs over `max(a.length, b.length)`, so
- * neither content nor an early mismatch is observable through timing. Length
- * is not hidden, which is standard for bearer-token checks.
- */
-function constantTimeEqual(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const aBytes = encoder.encode(a);
-  const bBytes = encoder.encode(b);
-  const length = Math.max(aBytes.length, bBytes.length);
-  let diff = aBytes.length ^ bBytes.length;
-  for (let index = 0; index < length; index += 1) {
-    diff |= (aBytes[index] ?? 0) ^ (bBytes[index] ?? 0);
-  }
-  return diff === 0;
-}
-
-/**
- * True when `header` is `Bearer <expected>` and `expected` is configured.
- * A missing/empty `OPERATOR_TOKEN` rejects every request (fail closed).
- */
-function isAuthorized(header: string | undefined, expected: string | undefined): boolean {
-  if (expected === undefined || expected === '') {
-    return false;
-  }
-  const match = /^Bearer\s+(.+)$/i.exec(header ?? '');
-  if (match === null) {
-    return false;
-  }
-  return constantTimeEqual(match[1] ?? '', expected);
-}
 
 /**
  * Mount the ingest API on `app`. `db` is the executor owned by the app
@@ -124,7 +113,7 @@ export function ingestApiRoute(app: Hono, db: Executor, config: IngestApiConfig 
   const uuid = config.uuid ?? ((): string => crypto.randomUUID());
 
   app.post('/api/ingest', async (c) => {
-    if (!isAuthorized(c.req.header('authorization'), config.operatorToken)) {
+    if (!isOperatorAuthorized(c.req.header('authorization'), config.operatorToken)) {
       return c.json({ error: 'unauthorized' }, 401);
     }
 
@@ -134,13 +123,27 @@ export function ingestApiRoute(app: Hono, db: Executor, config: IngestApiConfig 
     } catch {
       return c.json({ error: 'invalid JSON body' }, 400);
     }
-    const channel = (body as { channel?: unknown } | null | undefined)?.channel;
+    const fields = (body ?? {}) as { channel?: unknown; key?: unknown; captureLiveChat?: unknown };
+    const channel = fields.channel;
     if (typeof channel !== 'string') {
       return c.json({ error: 'body must be {"channel": "<@handle | UC… id | YouTube URL>"}' }, 400);
     }
     const normalized = normalizeChannelInput(channel);
     if (!normalized.ok) {
       return c.json({ error: normalized.error }, 400);
+    }
+    if (fields.captureLiveChat !== undefined && typeof fields.captureLiveChat !== 'boolean') {
+      return c.json({ error: 'captureLiveChat must be a boolean' }, 400);
+    }
+    const captureLiveChat = fields.captureLiveChat ?? false;
+    // `null` is treated like an absent key: the repo key pays.
+    const operatorKey = fields.key ?? undefined;
+    if (operatorKey !== undefined && (config.sealPublicKey ?? '') === '') {
+      // ADR-0008: never fall back to dispatching the key unsealed.
+      return c.json(
+        { error: 'OperatorKey ingest is not configured (INGEST_SEAL_PUBLIC_KEY)' },
+        503,
+      );
     }
 
     const nowDate = now();
@@ -157,6 +160,19 @@ export function ingestApiRoute(app: Hono, db: Executor, config: IngestApiConfig 
       return c.json({ requestId: active.id }, 409);
     }
 
+    let sealedKey: string | undefined;
+    if (operatorKey !== undefined) {
+      const verdict = await checkOperatorKey(operatorKey, config.keyCheckTransport);
+      if (!verdict.ok) {
+        return c.json({ reason: verdict.reason, message: verdict.message }, 422);
+      }
+      try {
+        sealedKey = await sealOperatorKey(operatorKey as string, config.sealPublicKey ?? '');
+      } catch {
+        return c.json({ error: 'INGEST_SEAL_PUBLIC_KEY is not a usable public JWK' }, 503);
+      }
+    }
+
     const requestId = uuid();
     const createdAt = nowDate.toISOString();
     try {
@@ -166,6 +182,8 @@ export function ingestApiRoute(app: Hono, db: Executor, config: IngestApiConfig 
         normalized.channelKey,
         createdAt,
         createdAt,
+        sealedKey !== undefined ? 'operator' : 'repo',
+        captureLiveChat ? 1 : 0,
       ]);
     } catch (error) {
       // The unique partial index (`idx_ingest_requests_active_channel`) caught
@@ -186,6 +204,8 @@ export function ingestApiRoute(app: Hono, db: Executor, config: IngestApiConfig 
         pat: config.dispatchPat ?? '',
         requestId,
         channel,
+        sealedKey,
+        captureLiveChat,
         transport: config.transport,
       });
     } catch {
