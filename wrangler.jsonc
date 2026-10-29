@@ -7,6 +7,12 @@
   // Workers Observability: every invocation's logs, status and latency,
   // queryable in the dashboard. Complements Sentry, which only sees errors.
   "observability": { "enabled": true },
+  // Custom domain (ADR-0002: "config-only"). The pedropinheiro.dev.br zone
+  // lives in this Cloudflare account; deploy creates the DNS record and cert,
+  // so the CI token needs Zone → Workers Routes: Edit and DNS: Edit on it.
+  // workers.dev stays on: external callers (Sentry hook) may still use it.
+  "workers_dev": true,
+  "routes": [{ "pattern": "ytb-index.pedropinheiro.dev.br", "custom_domain": true }],
   "d1_databases": [
     {
       "binding": "ytb_index",
