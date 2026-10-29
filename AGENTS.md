@@ -23,8 +23,8 @@ with no network: inject the existing seams (`transport`, `now`, `writer`,
 | --------------- | -------------------------------------------------------------------- |
 | `src/shared/`   | Domain types (`Channel`, `VideoRecord`, `CommentRecord`, `TimeAnchor`) |
 | `src/yt/`       | YouTube Data API client, quota, channel input parsing, TimeAnchor detection |
-| `src/db/`       | `Executor` interface, portable SQL, SQLite / D1 / D1 HTTP drivers     |
-| `src/ingest/`   | The Ingest pipeline: YouTube responses → Catalog rows, step by step   |
+| `src/db/`       | `Executor` interface; portable SQL split into Catalog reads (`catalog-reads`), search (`catalog-search`, `filter` builder, `search-text` normalizer) and Ingest writes (`ingest-writes`); SQLite / D1 / D1 HTTP drivers |
+| `src/ingest/`   | The Ingest pipeline as stages into a row sink (`stages`, `pipeline`) plus the live-chat stage (`live-chat`): YouTube responses → Catalog rows |
 | `src/cli/`      | `pnpm ingest`: env, quota, write target, status reporting, exit codes |
 | `src/server/`   | Hono app, SSR routes, operator ingest API, Sentry agent hook         |
 | `src/worker.ts` | Worker entry: the server app over the D1 binding                      |
