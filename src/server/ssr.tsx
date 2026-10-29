@@ -9,8 +9,11 @@
  *
  *  - `renderCatalog(channel, videos, channels, status)` — the `/` index page
  *    and the explicit `/c/:channelId` page: a YouTube-style video grid.
- *  - `renderVideo(video, comments, anchors)` — the `/v/:videoId` detail page:
- *    a watch-page layout with the comments and a "Key moments" panel.
+ *  - `renderVideo(video, comments, anchors, chatMessages)` — the
+ *    `/v/:videoId` detail page: a watch-page layout with the comments (Replies
+ *    nested under their parent), a "Key moments" panel and, for a Broadcast,
+ *    its badge, real start time and duration and a "Live chat" panel (F7 #54,
+ *    ADR-0009).
  *  - `renderNotFound(message)` — the shared 404 page.
  *
  * All use Hono's `html` tagged-template helper, which auto-escapes every
@@ -27,9 +30,11 @@ import type {
   Channel,
   CommentRecord,
   IngestRequest,
+  LiveChatMessage,
   TimeAnchor,
   VideoRecord,
 } from '../shared/types.ts';
+import { chatElementId, commentElementId, WATCH_URL } from './links.ts';
 import { STYLES } from './styles.ts';
 
 /** `Anchor` is the shared `TimeAnchor` domain type. */
@@ -884,12 +889,80 @@ function linkifyAnchors(text: string, anchors: Anchor[], videoId: string): Html 
   return html`${parts}`;
 }
 
-/** One top-level comment; timestamped comments get the accent border + footer. */
-function commentItem(videoId: string, comment: CommentRecord, anchors: Anchor[]): Html {
+/**
+ * A top-level CommentRecord with its Replies, oldest-first (F7 #54). Replies
+ * are rendered as one nested list inside their parent's element.
+ */
+interface CommentThread {
+  comment: CommentRecord;
+  replies: CommentRecord[];
+}
+
+/** Oldest-first by `publishedAt`, then by id: the order of a thread's Replies. */
+function oldestFirst(a: CommentRecord, b: CommentRecord): number {
+  if (a.publishedAt !== b.publishedAt) return a.publishedAt < b.publishedAt ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Group `comments` into threads: top-level CommentRecords keep their incoming
+ * order (newest-first), each Reply goes under its parent oldest-first. A Reply
+ * whose parent is not in `comments` is shown as a top-level thread of its own,
+ * in the incoming order, so it is never dropped.
+ */
+function commentThreads(comments: CommentRecord[]): CommentThread[] {
+  const ids = new Set(comments.map((comment) => comment.id));
+  const repliesByParent = new Map<string, CommentRecord[]>();
+  const threads: CommentThread[] = [];
+  for (const comment of comments) {
+    const parentId = comment.parentId ?? null;
+    if (parentId !== null && parentId !== comment.id && ids.has(parentId)) {
+      const replies = repliesByParent.get(parentId) ?? [];
+      replies.push(comment);
+      repliesByParent.set(parentId, replies);
+    } else {
+      threads.push({ comment, replies: [] });
+    }
+  }
+  for (const thread of threads) {
+    thread.replies = (repliesByParent.get(thread.comment.id) ?? []).sort(oldestFirst);
+  }
+  return threads;
+}
+
+/**
+ * One CommentRecord; timestamped ones get the accent border + footer, Replies
+ * the `reply` class. Every element carries `id="c-{commentId}"` so SearchHits
+ * can link to it (spec v2 "SearchHit links").
+ *
+ * The Timestamped filter chip shows timestamped CommentRecords and Replies.
+ * A top-level CommentRecord without anchors but with a timestamped Reply is
+ * marked `has-timestamped-reply` and stays visible as that Reply's context;
+ * its non-timestamped Replies are hidden (F7 #54).
+ */
+function commentItem(
+  videoId: string,
+  comment: CommentRecord,
+  anchorsByComment: Map<string, Anchor[]>,
+  replies: CommentRecord[] = [],
+  isReply = false,
+): Html {
+  const anchors = anchorsByComment.get(comment.id) ?? [];
   const classes = ['comment'];
-  if (anchors.length > 0) classes.push('timestamped');
+  if (isReply) classes.push('reply');
+  if (anchors.length > 0) {
+    classes.push('timestamped');
+  } else if (replies.some((reply) => anchorsByComment.has(reply.id))) {
+    classes.push('has-timestamped-reply');
+  }
   if (comment.isExpired === true) classes.push('expired');
-  return html`<li class="${classes.join(' ')}">
+  const replyList =
+    replies.length === 0
+      ? ''
+      : html`<ul class="replies">
+          ${replies.map((reply) => commentItem(videoId, reply, anchorsByComment, [], true))}
+        </ul>`;
+  return html`<li class="${classes.join(' ')}" id="${commentElementId(comment.id)}">
     ${avatar(comment.author)}
     <div class="comment-content">
       <p class="comment-meta">
@@ -903,6 +976,7 @@ function commentItem(videoId: string, comment: CommentRecord, anchors: Anchor[])
           >${comment.likeCount > 0 ? formatCount(comment.likeCount) : ''}</span
         >
       </p>
+      ${replyList}
     </div>
   </li>`;
 }
@@ -940,16 +1014,120 @@ function keyMomentsPanel(videoId: string, anchors: Anchor[]): Html | string {
   </aside>`;
 }
 
+/** One LiveChatMessage: its offset (linked to that second), author and text. */
+function chatItem(videoId: string, message: LiveChatMessage): Html {
+  return html`<li
+    class="chat-message${message.isExpired === true ? ' expired' : ''}"
+    id="${chatElementId(message.id)}"
+  >
+    <a
+      class="chat-time"
+      target="_blank"
+      rel="noopener noreferrer"
+      href="${WATCH_URL}${videoId}&t=${message.offsetSeconds}s"
+      >${formatTimestamp(message.offsetSeconds)}</a
+    >
+    <p class="chat-content">
+      <span class="author">${message.author}</span>
+      <span class="chat-text">${message.text}</span>
+    </p>
+  </li>`;
+}
+
+/**
+ * The "Live chat" side panel of a Broadcast (F7 #54, ADR-0009): its
+ * LiveChatMessages in stream order. Chat is captured only while a Broadcast
+ * is on air, so an ended Broadcast without messages says "Chat not captured"
+ * rather than looking empty by mistake. Uploads get no panel.
+ */
+function liveChatPanel(video: VideoRecord, messages: LiveChatMessage[]): Html | string {
+  if (video.kind !== 'broadcast') {
+    return '';
+  }
+  let body: Html;
+  if (messages.length > 0) {
+    body = html`<p class="hint">
+        ${messages.length} ${messages.length === 1 ? 'message' : 'messages'}, by time into the
+        Broadcast.
+      </p>
+      <ol class="chat-list">
+        ${messages.map((message) => chatItem(video.id, message))}
+      </ol>`;
+  } else if (video.broadcastState === 'live') {
+    body = html`<p class="hint">
+      No chat captured yet. Chat is recorded while the Broadcast is on air, by an Ingest with live
+      chat capture on.
+    </p>`;
+  } else {
+    body = html`<p class="chat-empty">Chat not captured</p>
+      <p class="hint">
+        Live chat is only recorded while a Broadcast is on air, so this one has none.
+      </p>`;
+  }
+  return html`<aside class="card chat-panel" aria-labelledby="chat-title">
+    <h2 id="chat-title">${icon('forum', true)}Live chat</h2>
+    ${body}
+  </aside>`;
+}
+
+/** An ISO-8601 instant as `YYYY-MM-DD HH:MM UTC`; the raw value when unparseable. */
+function formatUtcMinute(iso: string): string {
+  const time = Date.parse(iso);
+  if (Number.isNaN(time)) {
+    return iso;
+  }
+  return `${new Date(time).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+/**
+ * A Broadcast's length: actual end minus actual start when both are known,
+ * else the stored `contentDetails` duration. `''` when neither gives one.
+ */
+function broadcastDuration(video: VideoRecord): string {
+  const start = Date.parse(video.actualStartTime ?? '');
+  const end = Date.parse(video.actualEndTime ?? '');
+  if (!Number.isNaN(start) && !Number.isNaN(end) && end > start) {
+    return formatTimestamp(Math.floor((end - start) / 1000));
+  }
+  return formatDuration(video.durationIso8601);
+}
+
+/**
+ * The Broadcast line under the title (spec v2 story 51): a "Live" or
+ * "Broadcast" badge, the real start time and the duration. Uploads get none.
+ */
+function broadcastLine(video: VideoRecord): Html | string {
+  if (video.kind !== 'broadcast') {
+    return '';
+  }
+  const live = video.broadcastState === 'live';
+  const start = video.actualStartTime ?? null;
+  const duration = broadcastDuration(video);
+  return html`<p class="broadcast-line">
+    <span class="broadcast-badge${live ? ' broadcast-live' : ''}"
+      >${live ? 'Live' : 'Broadcast'}</span
+    >
+    ${
+      start === null ? '' : html`<time datetime="${start}">Started ${formatUtcMinute(start)}</time>`
+    }
+    ${duration === '' ? '' : html`<span>${duration}</span>`}
+  </p>`;
+}
+
 /**
  * Render the `/v/:videoId` detail page.
  *
- * `comments` arrive newest-first from the read query; `anchors` is the flat set
- * of anchors for every comment on the video (grouped here by `commentId`).
+ * `comments` arrive newest-first from the read query, top-level CommentRecords
+ * and Replies alike (Replies are nested here under their parent); `anchors` is
+ * the flat set of anchors for every comment on the video (grouped here by
+ * `commentId`); `chatMessages` are the video's LiveChatMessages in stream
+ * order, rendered only for a Broadcast.
  */
 export function renderVideo(
   video: VideoRecord,
   comments: CommentRecord[],
   anchors: Anchor[],
+  chatMessages: LiveChatMessage[] = [],
 ): string {
   const anchorsByComment = new Map<string, Anchor[]>();
   for (const anchor of anchors) {
@@ -977,10 +1155,14 @@ export function renderVideo(
             >
           </div>
           <ul class="comments">
-            ${comments.map((comment) =>
-              commentItem(video.id, comment, anchorsByComment.get(comment.id) ?? []),
+            ${commentThreads(comments).map((thread) =>
+              commentItem(video.id, thread.comment, anchorsByComment, thread.replies),
             )}
           </ul>`;
+
+  const moments = keyMomentsPanel(video.id, anchors);
+  const chat = liveChatPanel(video, chatMessages);
+  const side = chat === '' ? moments : html`<div class="watch-side">${moments}${chat}</div>`;
 
   const alt = video.title === '' ? 'Video thumbnail' : video.title;
   return page(
@@ -1004,6 +1186,7 @@ export function renderVideo(
             <time datetime="${video.publishedAt}">${relativeDate(video.publishedAt)}</time>
             <span>${formatCount(video.likeCount)} likes</span>
           </p>
+          ${broadcastLine(video)}
           <div class="watch-actions">
             <a
               target="_blank"
@@ -1021,7 +1204,7 @@ export function renderVideo(
           ${commentList}
         </section>
       </div>
-      ${keyMomentsPanel(video.id, anchors)}
+      ${side}
     </div>`,
   );
 }

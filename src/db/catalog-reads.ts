@@ -7,16 +7,23 @@
  * ADR-0001) and TimeAnchors, per-video timestamped counts, Channels (latest,
  * by id, the switcher list) and the latest IngestRequest. Search (ADR-0010)
  * lives beside it in `./catalog-search.ts` (F4 #50), built on `./filter.ts`.
+ * F7 (#54) extends the video page's reads: `getVideo` carries the Broadcast
+ * fields, `listVideoComments` the Reply fields, and `listVideoChatMessages`
+ * reads a Broadcast's LiveChatMessages through `live_chat_messages_active`
+ * (ADR-0009, ADR-0001).
  *
  * SQL is portable (positional `?` parameters only, no pragmas) so the same
  * strings run on better-sqlite3 and D1, and every value is bound, never
  * interpolated. Ingest writes live in `./ingest-writes.ts`.
  */
 import type {
+  BroadcastState,
   Channel,
   CommentRecord,
   IngestRequest,
+  LiveChatMessage,
   TimeAnchor,
+  VideoKind,
   VideoRecord,
 } from '../shared/types.ts';
 import type { Executor } from './executor.ts';
@@ -93,10 +100,19 @@ export async function listChannelVideos(
   return rows.map(toVideoRecord);
 }
 
+/** A video row plus the Broadcast columns of migration 0003 (F7 #54). */
+interface VideoDetailRow extends VideoRow {
+  kind: VideoKind;
+  broadcast_state: BroadcastState | null;
+  actual_start_time: string | null;
+  actual_end_time: string | null;
+}
+
 const GET_VIDEO_SQL = `
   SELECT
     id, channel_id, title, description, published_at, thumbnail_url,
-    duration_iso8601, view_count, like_count, comment_count, fetched_at
+    duration_iso8601, view_count, like_count, comment_count, fetched_at,
+    kind, broadcast_state, actual_start_time, actual_end_time
   FROM videos
   WHERE id = ?
 `;
@@ -104,13 +120,24 @@ const GET_VIDEO_SQL = `
 /**
  * One VideoRecord by its `videoId`, or `undefined` when the Catalog has no
  * such video. A single-row primary-key lookup: it never scans the Catalog.
+ * Carries `kind`, `broadcastState` and the real start / end times so the
+ * video page can show a Broadcast as one (F7 #54).
  */
 export async function getVideo(
   executor: Executor,
   videoId: string,
 ): Promise<VideoRecord | undefined> {
-  const row = await executor.get<VideoRow>(GET_VIDEO_SQL, [videoId]);
-  return row === undefined ? undefined : toVideoRecord(row);
+  const row = await executor.get<VideoDetailRow>(GET_VIDEO_SQL, [videoId]);
+  if (row === undefined) {
+    return undefined;
+  }
+  return {
+    ...toVideoRecord(row),
+    kind: row.kind,
+    broadcastState: row.broadcast_state,
+    actualStartTime: row.actual_start_time,
+    actualEndTime: row.actual_end_time,
+  };
 }
 
 interface CommentActiveRow {
@@ -125,12 +152,15 @@ interface CommentActiveRow {
   fetched_at: string;
   expires_at: string;
   is_expired: 0 | 1;
+  author_channel_id: string;
+  parent_id: string | null;
 }
 
 const LIST_VIDEO_COMMENTS_SQL = `
   SELECT
     id, video_id, channel_id, author, text, published_at,
-    like_count, has_anchors, fetched_at, expires_at, is_expired
+    like_count, has_anchors, fetched_at, expires_at, is_expired,
+    author_channel_id, parent_id
   FROM comments_active
   WHERE video_id = ?
   ORDER BY published_at DESC
@@ -142,6 +172,8 @@ function toCommentRecord(row: CommentActiveRow): CommentRecord {
     videoId: row.video_id,
     channelId: row.channel_id,
     author: row.author,
+    authorChannelId: row.author_channel_id,
+    parentId: row.parent_id,
     text: row.text,
     publishedAt: row.published_at,
     likeCount: row.like_count,
@@ -153,9 +185,11 @@ function toCommentRecord(row: CommentActiveRow): CommentRecord {
 }
 
 /**
- * Comments for one video, newest-first by `published_at`. Reads from the
- * `comments_active` view so TTL redaction (ADR-0001) and the derived
- * `expires_at` / `is_expired` columns flow through.
+ * Comments for one video, top-level CommentRecords and Replies alike,
+ * newest-first by `published_at`. Reads from the `comments_active` view so
+ * TTL redaction (ADR-0001) and the derived `expires_at` / `is_expired`
+ * columns flow through; `parentId` is `null` for a top-level CommentRecord
+ * and the parent's id for a Reply.
  */
 export async function listVideoComments(
   executor: Executor,
@@ -163,6 +197,56 @@ export async function listVideoComments(
 ): Promise<CommentRecord[]> {
   const rows = await executor.all<CommentActiveRow>(LIST_VIDEO_COMMENTS_SQL, [videoId]);
   return rows.map(toCommentRecord);
+}
+
+interface ChatMessageActiveRow {
+  id: string;
+  video_id: string;
+  channel_id: string;
+  author: string;
+  author_channel_id: string;
+  text: string;
+  published_at: string;
+  offset_seconds: number;
+  fetched_at: string;
+  expires_at: string;
+  is_expired: 0 | 1;
+}
+
+const LIST_VIDEO_CHAT_MESSAGES_SQL = `
+  SELECT
+    id, video_id, channel_id, author, author_channel_id, text, published_at,
+    offset_seconds, fetched_at, expires_at, is_expired
+  FROM live_chat_messages_active
+  WHERE video_id = ?
+  ORDER BY offset_seconds, published_at, id
+`;
+
+/**
+ * A Broadcast's LiveChatMessages in stream order: by `offset_seconds`, then
+ * `published_at`, then `id` (F7 #54). Reads from the
+ * `live_chat_messages_active` view, so an expired message's text is the
+ * redaction placeholder (ADR-0009, ADR-0001). Empty for an upload or a
+ * Broadcast whose chat was not captured.
+ */
+export async function listVideoChatMessages(
+  executor: Executor,
+  videoId: string,
+): Promise<LiveChatMessage[]> {
+  const rows = await executor.all<ChatMessageActiveRow>(LIST_VIDEO_CHAT_MESSAGES_SQL, [videoId]);
+  return rows.map((row) => ({
+    id: row.id,
+    videoId: row.video_id,
+    channelId: row.channel_id,
+    author: row.author,
+    authorChannelId: row.author_channel_id,
+    text: row.text,
+    publishedAt: row.published_at,
+    offsetSeconds: row.offset_seconds,
+    fetchedAt: row.fetched_at,
+    expiresAt: row.expires_at,
+    isExpired: row.is_expired === 1,
+  }));
 }
 
 interface AnchorRow {
