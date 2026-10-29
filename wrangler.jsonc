@@ -4,6 +4,9 @@
   "compatibility_date": "2025-09-01",
   // Required by @sentry/cloudflare (ADR-0006).
   "compatibility_flags": ["nodejs_compat"],
+  // Workers Observability: every invocation's logs, status and latency,
+  // queryable in the dashboard. Complements Sentry, which only sees errors.
+  "observability": { "enabled": true },
   "d1_databases": [
     {
       "binding": "ytb_index",
