@@ -6,11 +6,10 @@
  * `renderVideo`. Unknown ids return a `text/html` 404 page.
  */
 import type { Hono } from 'hono';
-import { html } from 'hono/html';
 import { listCatalog, listVideoComments } from '../../db/queries.ts';
 import type { Executor } from '../../db/executor.ts';
 import type { TimeAnchor } from '../../shared/types.ts';
-import { renderVideo } from '../ssr.tsx';
+import { renderNotFound, renderVideo } from '../ssr.tsx';
 
 interface AnchorRow {
   comment_id: string;
@@ -26,17 +25,6 @@ const SELECT_ANCHORS_SQL = `
   WHERE c.video_id = ?
   ORDER BY ta.comment_id, ta.char_position
 `;
-
-const NOT_FOUND_HTML = html`<!doctype html>
-  <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <title>Not found — ytb-index</title>
-    </head>
-    <body>
-      <h1>404 Not Found</h1>
-    </body>
-  </html>`.toString();
 
 /**
  * Every anchor for the video's comments, flat. Expired comments keep their
@@ -61,7 +49,7 @@ export function videoRoute(app: Hono, db: Executor): void {
     const videoId = c.req.param('videoId');
     const video = (await listCatalog(db)).find((candidate) => candidate.id === videoId);
     if (video === undefined) {
-      return c.html(NOT_FOUND_HTML, 404);
+      return c.html(renderNotFound('Unknown video.'), 404);
     }
     const comments = await listVideoComments(db, videoId);
     const anchors = await listAnchorsForVideo(db, videoId);

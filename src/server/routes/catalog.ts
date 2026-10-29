@@ -9,12 +9,11 @@
  * data-in / string-out.
  */
 import type { Hono } from 'hono';
-import { html } from 'hono/html';
 import type { Executor } from '../../db/executor.ts';
 import type { VideoRecord } from '../../shared/types.ts';
 import { loadCatalog, listChannels, loadLatestIngestStatus } from '../data.ts';
 import type { CatalogVideo } from '../ssr.tsx';
-import { renderCatalog } from '../ssr.tsx';
+import { renderCatalog, renderNotFound } from '../ssr.tsx';
 
 interface TimestampedCountRow {
   video_id: string;
@@ -41,18 +40,6 @@ async function withTimestampedCounts(db: Executor, videos: VideoRecord[]): Promi
   }));
 }
 
-const NOT_FOUND_CHANNEL_HTML = html`<!doctype html>
-  <html lang="en">
-    <head>
-      <meta charset="utf-8" />
-      <title>Not found — ytb-index</title>
-    </head>
-    <body>
-      <h1>404 Not Found</h1>
-      <p>Unknown channel.</p>
-    </body>
-  </html>`.toString();
-
 /**
  * Mount `GET /` and `GET /c/:channelId` on `app`. `db` is the executor owned
  * by the app factory (see `createApp`); the handler awaits the per-request reads.
@@ -71,7 +58,7 @@ export function catalogRoute(app: Hono, db: Executor): void {
     const channelId = c.req.param('channelId');
     const catalog = await loadCatalog(db, channelId);
     if (catalog === null) {
-      return c.html(NOT_FOUND_CHANNEL_HTML, 404);
+      return c.html(renderNotFound('Unknown channel.'), 404);
     }
     const videos = await withTimestampedCounts(db, catalog.videos);
     const channels = (await listChannels(db)).map((ch) => ({ id: ch.channelId, title: ch.title }));
