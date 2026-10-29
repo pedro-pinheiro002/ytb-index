@@ -253,3 +253,40 @@ describe('top app bar search', () => {
     assert.ok(body.includes('name="q"'));
   });
 });
+
+describe('GET /search: last page', () => {
+  it('offers no Next link on the last allowed page, even with more hits (max page 40)', async () => {
+    const { renderSearch } = await import('./search-page.tsx');
+    const { SEARCH_MAX_PAGE } = await import('../db/catalog-search.ts');
+    const out = renderSearch({
+      params: new URLSearchParams({ q: 'acao', page: String(SEARCH_MAX_PAGE) }),
+      channels: [],
+      state: {
+        type: 'results',
+        terms: ['acao'],
+        result: {
+          hits: [
+            {
+              kind: 'video',
+              videoId: 'v1',
+              videoTitle: 'Ação',
+              recordId: 'v1',
+              author: '',
+              authorChannelId: '',
+              publishedAt: '2026-01-01T00:00:00Z',
+              text: 'Ação',
+              likeCount: 0,
+              anchorSeconds: [],
+              offsetSeconds: null,
+              parentId: null,
+            },
+          ],
+          hasNextPage: true,
+          page: SEARCH_MAX_PAGE,
+        },
+      },
+    });
+    assert.ok(!out.includes('rel="next"'));
+    assert.ok(out.includes('rel="prev"'));
+  });
+});

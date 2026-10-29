@@ -377,6 +377,10 @@ describe('GET /api/ingest/status', () => {
         status: 'queued',
         videosWritten: 0,
         commentsWritten: 0,
+        repliesWritten: 0,
+        chatMessagesWritten: 0,
+        skippedVideos: 0,
+        quotaUsed: 0,
         error: null,
         updatedAt: '2026-01-01T00:00:00.000Z',
       });
@@ -393,6 +397,7 @@ describe('GET /api/ingest/status', () => {
       await db.run(
         `UPDATE ingest_requests
          SET status = 'done', channel_id = ?, videos_written = 12, comments_written = 34,
+             replies_written = 5, chat_messages_written = 7, skipped_videos = 2, quota_used = 91,
              updated_at = ?, finished_at = ?
          WHERE id = ?`,
         [UC_ID, '2026-01-01T00:05:00.000Z', '2026-01-01T00:05:00.000Z', 'req-1'],
@@ -406,6 +411,10 @@ describe('GET /api/ingest/status', () => {
         status: 'done',
         videosWritten: 12,
         commentsWritten: 34,
+        repliesWritten: 5,
+        chatMessagesWritten: 7,
+        skippedVideos: 2,
+        quotaUsed: 91,
         error: null,
         updatedAt: '2026-01-01T00:05:00.000Z',
       });

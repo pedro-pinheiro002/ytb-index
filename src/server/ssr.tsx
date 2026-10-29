@@ -352,7 +352,11 @@ function statusBlock(status: IngestRequest | null): Html {
   if (status === null) {
     return html`<div class="status" id="ingest-status"><p>No ingest requests yet.</p></div>`;
   }
-  const counts = `${status.videosWritten} videos / ${status.commentsWritten} comments`;
+  // Spec v2 stories 22–23: every counter the runner reports (F3a/F3b).
+  const counts =
+    `${status.videosWritten} videos / ${status.commentsWritten} comments / ` +
+    `${status.repliesWritten ?? 0} replies / ${status.chatMessagesWritten ?? 0} chat messages · ` +
+    `${status.skippedVideos ?? 0} videos skipped · ${status.quotaUsed ?? 0} quota units`;
   const active = status.status === 'queued' || status.status === 'running';
   const errorBlock =
     status.status === 'failed' && status.error
@@ -589,7 +593,9 @@ function operatorScript(): string {
     if (!data) { area.innerHTML = '<p>No ingest requests yet.</p>'; return; }
     var status = escapeHtml(data.status);
     var html = '<span class="status-badge status-' + status + '">' + status + '</span>' +
-      '<span>' + (data.videosWritten || 0) + ' videos / ' + (data.commentsWritten || 0) + ' comments</span>' +
+      '<span>' + (data.videosWritten || 0) + ' videos / ' + (data.commentsWritten || 0) + ' comments / ' +
+      (data.repliesWritten || 0) + ' replies / ' + (data.chatMessagesWritten || 0) + ' chat messages · ' +
+      (data.skippedVideos || 0) + ' videos skipped · ' + (data.quotaUsed || 0) + ' quota units</span>' +
       '<span>updated ' + escapeHtml(new Date(data.updatedAt).toLocaleString()) + '</span>';
     if (data.status === 'queued' || data.status === 'running') {
       html += '<div class="progress" role="progressbar" aria-label="Ingest in progress"></div>';

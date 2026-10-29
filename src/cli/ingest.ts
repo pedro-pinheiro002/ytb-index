@@ -56,7 +56,7 @@ import type { Transport } from '../yt/client.ts';
 import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { createD1RestWriter, type D1RestWriter } from '../db/d1-http.ts';
-import { ingestStatements, liveChatMessageStatements } from '../db/queries.ts';
+import { ingestStatements, liveChatMessageStatements } from '../db/ingest-writes.ts';
 import { ChannelNotFoundError, defaultIngestStages, isQuotaExceeded } from '../ingest/pipeline.ts';
 import {
   createBufferingSink,

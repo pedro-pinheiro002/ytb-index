@@ -147,6 +147,12 @@ describe('POST /api/key/check', () => {
       }),
       reason: 'restricted',
     },
+    {
+      // A short-term rate limit, not the daily quota: retry, no midnight-PT message.
+      name: '403 rateLimitExceeded',
+      reply: googleError(403, { reason: 'rateLimitExceeded' }),
+      reason: 'unavailable',
+    },
     { name: '503', reply: googleError(503, { reason: 'backendError' }), reason: 'unavailable' },
     { name: 'network error', reply: new TypeError('fetch failed'), reason: 'unavailable' },
   ];

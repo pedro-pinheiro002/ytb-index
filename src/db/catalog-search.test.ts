@@ -310,6 +310,13 @@ describe('searchCatalog: kinds', () => {
     assert.deepEqual(await ids({ terms: ['passeio'], kinds: ['video'] }), ['vA1']);
   });
 
+  it('refuses more than SEARCH_MAX_TERMS terms, keeping D1 under 100 bound params', async () => {
+    await assert.rejects(
+      search({ terms: Array.from({ length: 9 }, (_, i) => `t${i}`) }),
+      RangeError,
+    );
+  });
+
   it('merges explicit kinds into one ordered page', async () => {
     assert.deepEqual(await ids({ terms: ['acao'], kinds: ['video', 'chat'] }), [
       'm1',
@@ -364,7 +371,7 @@ describe('searchCatalog: SearchHit shape', () => {
       author: '',
       authorChannelId: '',
       publishedAt: '2024-01-10T15:00:00Z',
-      text: 'Ação no parque',
+      text: 'Ação no parque — Um passeio',
       likeCount: 0,
       anchorSeconds: [],
       offsetSeconds: null,

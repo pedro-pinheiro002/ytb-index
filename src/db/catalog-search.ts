@@ -270,7 +270,7 @@ const COMMENT_SELECT = `
     NULL AS offset_seconds, c.parent_id AS parent_id, p.author AS parent_author
   FROM comments_active c
   JOIN videos v ON v.id = c.video_id
-  LEFT JOIN comments p ON p.id = c.parent_id
+  LEFT JOIN comments_active p ON p.id = c.parent_id
 `;
 
 const CHAT_SELECT = `
@@ -285,7 +285,8 @@ const CHAT_SELECT = `
 const VIDEO_SELECT = `
   SELECT 'video' AS kind, v.id AS video_id, v.title AS video_title, v.id AS record_id,
     '' AS author, '' AS author_channel_id,
-    v.published_at AS published_at, v.title AS text, 0 AS like_count,
+    v.published_at AS published_at, CASE WHEN v.description = '' THEN v.title
+      ELSE v.title || ' — ' || v.description END AS text, 0 AS like_count,
     NULL AS offset_seconds, NULL AS parent_id, NULL AS parent_author
   FROM videos v
 `;
@@ -482,12 +483,20 @@ function toSearchHit(row: HitRow, anchors: Map<string, number[]>): SearchHit {
  *
  * An {@link isEmptySearch} query returns an empty page without any query.
  *
- * @throws RangeError when `query.page` is not an integer from 1 to 40.
+ * @throws RangeError when `query.page` is not an integer from 1 to 40, or
+ *   `query.terms` holds more than {@link SEARCH_MAX_TERMS} terms.
  */
 export async function searchCatalog(executor: Executor, query: SearchQuery): Promise<SearchPage> {
   const { page } = query;
   if (!Number.isSafeInteger(page) || page < 1 || page > SEARCH_MAX_PAGE) {
     throw new RangeError(`searchCatalog: page must be 1..${SEARCH_MAX_PAGE}, got ${page}`);
+  }
+  // The cap keeps every statement under D1's 100 bound parameters (~16 per
+  // UNION branch at 8 terms); parseSearchQuery enforces it for the route.
+  if (query.terms.length > SEARCH_MAX_TERMS) {
+    throw new RangeError(
+      `searchCatalog: at most ${SEARCH_MAX_TERMS} terms, got ${query.terms.length}`,
+    );
   }
   const empty: SearchPage = { hits: [], hasNextPage: false, page };
 

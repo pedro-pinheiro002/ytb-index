@@ -22,7 +22,7 @@
  * runs the live-chat stage after the main write into a flushing sink.
  */
 import type { YouTubeClient } from '../yt/client.ts';
-import type { IngestRows } from '../db/queries.ts';
+import type { IngestRows } from '../db/ingest-writes.ts';
 import type {
   Channel,
   ChannelInput,

@@ -33,7 +33,6 @@ export type {
   ListCommentThreadsParams,
   ListCommentsParams,
   ListLiveChatMessagesParams,
-  YouTubeV2Client,
   LiveStreamingDetails,
   LiveBroadcastContent,
   CommentListResponse,

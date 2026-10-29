@@ -14,7 +14,7 @@
  * Pure and side-effect free: no database, no clock beyond `relativeDate`.
  */
 import { html } from 'hono/html';
-import { DEFAULT_SEARCH_KINDS, type SearchPage } from '../db/catalog-search.ts';
+import { DEFAULT_SEARCH_KINDS, SEARCH_MAX_PAGE, type SearchPage } from '../db/catalog-search.ts';
 import type { SearchHit, SearchHitKind, SearchSort } from '../shared/types.ts';
 import { matchRanges } from './highlight.ts';
 import { chatElementId, commentElementId, WATCH_URL } from './links.ts';
@@ -210,11 +210,12 @@ function pagination(params: URLSearchParams, result: SearchPage): Html | string 
           >Previous</a
         >`
       : '';
-  const next = result.hasNextPage
-    ? html`<a class="btn btn-outlined" rel="next" href="${pageHref(params, result.page + 1)}"
-        >Next</a
-      >`
-    : '';
+  const next =
+    result.hasNextPage && result.page < SEARCH_MAX_PAGE
+      ? html`<a class="btn btn-outlined" rel="next" href="${pageHref(params, result.page + 1)}"
+          >Next</a
+        >`
+      : '';
   if (prev === '' && next === '') return '';
   return html`<nav class="search-pagination" aria-label="Pages">
     ${prev}<span>Page ${result.page}</span>${next}

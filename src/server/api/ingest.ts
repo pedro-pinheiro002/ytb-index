@@ -230,6 +230,10 @@ export function ingestApiRoute(app: Hono, db: Executor, config: IngestApiConfig 
       status: latest.status,
       videosWritten: latest.videosWritten,
       commentsWritten: latest.commentsWritten,
+      repliesWritten: latest.repliesWritten ?? 0,
+      chatMessagesWritten: latest.chatMessagesWritten ?? 0,
+      skippedVideos: latest.skippedVideos ?? 0,
+      quotaUsed: latest.quotaUsed ?? 0,
       error: latest.error,
       updatedAt: latest.updatedAt,
     });

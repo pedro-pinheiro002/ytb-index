@@ -382,14 +382,6 @@ export interface YouTubeClient {
 }
 
 /**
- * Former name of the full client, kept as an alias so code written against
- * F2 keeps compiling.
- *
- * @deprecated Use {@link YouTubeClient}.
- */
-export type YouTubeV2Client = YouTubeClient;
-
-/**
  * Quota units charged per call of each client method.
  *
  * Source: the Data API Quota Calculator

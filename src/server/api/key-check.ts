@@ -88,7 +88,9 @@ function envelopeSignals(body: unknown): Set<string> {
 }
 
 const INVALID_SIGNALS = ['keyInvalid', 'API_KEY_INVALID', 'INVALID_ARGUMENT'];
-const QUOTA_SIGNALS = ['quotaExceeded', 'dailyLimitExceeded', 'rateLimitExceeded'];
+// `rateLimitExceeded` is a short-term rate limit, not the daily quota: it
+// falls through to `unavailable` (try again) instead of the midnight-PT message.
+const QUOTA_SIGNALS = ['quotaExceeded', 'dailyLimitExceeded'];
 const NOT_ENABLED_SIGNALS = ['accessNotConfigured', 'SERVICE_DISABLED'];
 const RESTRICTED_SIGNALS = [
   'ipRefererBlocked',

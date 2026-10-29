@@ -100,7 +100,7 @@ export async function listChannelVideos(
   return rows.map(toVideoRecord);
 }
 
-/** A video row plus the Broadcast columns of migration 0003 (F7 #54). */
+/** A VideoRecord's columns plus the Broadcast columns of migration 0003 (F7 #54). */
 interface VideoDetailRow extends VideoRow {
   kind: VideoKind;
   broadcast_state: BroadcastState | null;
@@ -395,6 +395,12 @@ interface IngestRequestRow {
   status: string;
   videos_written: number;
   comments_written: number;
+  replies_written: number;
+  chat_messages_written: number;
+  skipped_videos: number;
+  quota_used: number;
+  key_source: string;
+  capture_live_chat: number;
   error: string | null;
   created_at: string;
   updated_at: string;
@@ -404,7 +410,9 @@ interface IngestRequestRow {
 const LATEST_INGEST_STATUS_SQL = `
   SELECT
     id, channel_input, channel_key, channel_id, status,
-    videos_written, comments_written, error, created_at, updated_at, finished_at
+    videos_written, comments_written, replies_written, chat_messages_written,
+    skipped_videos, quota_used, key_source, capture_live_chat,
+    error, created_at, updated_at, finished_at
   FROM ingest_requests
   ORDER BY updated_at DESC
   LIMIT 1
@@ -419,6 +427,12 @@ function toIngestRequest(row: IngestRequestRow): IngestRequest {
     status: row.status as IngestRequest['status'],
     videosWritten: row.videos_written,
     commentsWritten: row.comments_written,
+    repliesWritten: row.replies_written,
+    chatMessagesWritten: row.chat_messages_written,
+    skippedVideos: row.skipped_videos,
+    quotaUsed: row.quota_used,
+    keySource: row.key_source === 'operator' ? 'operator' : 'repo',
+    captureLiveChat: row.capture_live_chat === 1,
     error: row.error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

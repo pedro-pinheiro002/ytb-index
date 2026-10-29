@@ -28,7 +28,7 @@
 import { detectAnchors } from '../yt/anchors.ts';
 import { ApiError } from '../yt/client.ts';
 import type { CommentResource, CommentThread, VideoResource } from '../yt/client.ts';
-import type { IngestRows } from '../db/queries.ts';
+import type { IngestRows } from '../db/ingest-writes.ts';
 import { normalizeSearchText } from '../db/search-text.ts';
 import {
   createBufferingSink,

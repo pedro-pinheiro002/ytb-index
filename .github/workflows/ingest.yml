@@ -55,7 +55,7 @@ jobs:
           # CLI unseals it with the private JWK and uses it instead (ADR-0008).
           INGEST_SEALED_KEY: ${{ github.event.client_payload.sealedKey }}
           INGEST_SEAL_PRIVATE_KEY: ${{ secrets.INGEST_SEAL_PRIVATE_KEY }}
-          # Live-chat opt-in (ADR-0009). Passed through now; the CLI starts
-          # reading it when the live-chat ticket lands its flag.
+          # Live-chat opt-in (ADR-0009): the CLI captures on-air Broadcasts'
+          # chat when this is "true" (same as --live-chat).
           INGEST_CAPTURE_LIVE_CHAT: ${{ github.event.client_payload.captureLiveChat }}
         run: pnpm ingest "$INGEST_CHANNEL" --remote --report-status "$INGEST_REQUEST_ID"
