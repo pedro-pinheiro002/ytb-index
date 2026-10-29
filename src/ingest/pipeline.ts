@@ -20,6 +20,10 @@
  * each thread's Replies (embedded, or paged with `comments.list` when YouTube
  * embeds fewer than `totalReplyCount`); every row carries `search_text`
  * (`normalizeSearchText`) and CommentRecords carry `authorChannelId`.
+ *
+ * F3b (#52, ADR-0009): enrich also hands each on-air Broadcast's
+ * `activeLiveChatId` to later stages, and the comments stage records the
+ * videos it skipped; the live-chat stage itself lives in `./live-chat.ts`.
  */
 import { detectAnchors } from '../yt/anchors.ts';
 import { ApiError } from '../yt/client.ts';
@@ -240,12 +244,14 @@ export interface EnrichedVideos {
   videos: VideoRecord[];
   /** Upcoming Broadcasts: not stored, no comments fetched (spec v2). */
   skippedVideoIds: string[];
+  /** `videoId → activeLiveChatId` of each on-air Broadcast (F3b, #52). */
+  liveChatIds: Map<string, string>;
 }
 
 /**
  * Step 7: batch-enrich videos in chunks of ≤50 (1 unit/batch) and classify
  * them; each upcoming Broadcast is logged as `[skip] <id>: upcoming Broadcast`
- * and left out.
+ * and left out. Each on-air Broadcast's `activeLiveChatId` is returned too.
  */
 export async function enrichVideos(
   ctx: PipelineContext,
@@ -254,6 +260,7 @@ export async function enrichVideos(
 ): Promise<EnrichedVideos> {
   const videos: VideoRecord[] = [];
   const skippedVideoIds: string[] = [];
+  const liveChatIds = new Map<string, string>();
   for (let offset = 0; offset < videoIds.length; offset += VIDEO_BATCH_SIZE) {
     const batch = videoIds.slice(offset, offset + VIDEO_BATCH_SIZE);
     const page = await ctx.call('videos.list', () => ctx.client.listVideos({ id: batch }));
@@ -263,10 +270,15 @@ export async function enrichVideos(
         skippedVideoIds.push(item.id);
         continue;
       }
-      videos.push(toVideoRecord(item, channelId, ctx.fetchedAt));
+      const video = toVideoRecord(item, channelId, ctx.fetchedAt);
+      const liveChatId = item.liveStreamingDetails?.activeLiveChatId;
+      if (video.broadcastState === 'live' && liveChatId !== undefined && liveChatId !== '') {
+        liveChatIds.set(video.id, liveChatId);
+      }
+      videos.push(video);
     }
   }
-  return { videos, skippedVideoIds };
+  return { videos, skippedVideoIds, liveChatIds };
 }
 
 /**
@@ -301,11 +313,13 @@ export async function fetchReplies(
  * Step 8: per-video comment pages (1 unit/page): each top-level comment
  * followed by its Replies ({@link fetchReplies}). A video with
  * `commentsDisabled` / `videoNotFound` is skipped; any other error aborts the
- * run. The verbose `comments=` count is top-level comments only.
+ * run; `onSkip` hears each skipped video id. The verbose `comments=` count is
+ * top-level comments only.
  */
 export async function fetchComments(
   ctx: PipelineContext,
   videos: VideoRecord[],
+  onSkip: (videoId: string) => void = () => {},
 ): Promise<RawComment[]> {
   const rawComments: RawComment[] = [];
   for (const video of videos) {
@@ -337,6 +351,7 @@ export async function fetchComments(
       const reason = apiErrorReason(err);
       if (reason === 'commentsDisabled' || reason === 'videoNotFound') {
         ctx.log(`[skip] ${video.id}: ${reason}`);
+        onSkip(video.id);
         continue;
       }
       throw err;
@@ -433,9 +448,14 @@ export const defaultIngestStages: readonly IngestStage[] = [
       const channel = requireState(run.state, 'channel');
       const videoIds = requireState(run.state, 'videoIds');
       run.log(`[6/8] Enriching ${videoIds.length} videos...`);
-      const { videos, skippedVideoIds } = await enrichVideos(run, videoIds, channel.id);
+      const { videos, skippedVideoIds, liveChatIds } = await enrichVideos(
+        run,
+        videoIds,
+        channel.id,
+      );
       run.state.videos = videos;
       run.state.skippedVideoIds = skippedVideoIds;
+      run.state.liveChatIds = liveChatIds;
       await run.sink.emit({ videos });
     },
   },
@@ -445,7 +465,11 @@ export const defaultIngestStages: readonly IngestStage[] = [
       const channel = requireState(run.state, 'channel');
       const videos = requireState(run.state, 'videos');
       run.log(`[7/8] Fetching comments for ${videos.length} videos...`);
-      const rawComments = await fetchComments(run, videos);
+      const commentsSkippedVideoIds: string[] = [];
+      const rawComments = await fetchComments(run, videos, (videoId) => {
+        commentsSkippedVideoIds.push(videoId);
+      });
+      run.state.commentsSkippedVideoIds = commentsSkippedVideoIds;
       run.log('[8/8] Detecting timestamps and persisting...');
       await run.sink.emit(toCommentRows(rawComments, channel.id, run.fetchedAt));
     },

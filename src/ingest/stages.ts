@@ -14,6 +14,12 @@
  *
  * F3a (#49): `client` is the single `YouTubeClient` (Replies via
  * `listComments`), and the state also records skipped upcoming Broadcasts.
+ *
+ * F3b (#52, ADR-0009): `call` takes the call's quota units (a live-chat poll
+ * costs 5), batches may carry LiveChatMessages, the state carries each on-air
+ * Broadcast's live chat id and the videos whose comments were skipped, and
+ * {@link runIngestStages} can resume from an earlier run's state, so the CLI
+ * runs the live-chat stage after the main write into a flushing sink.
  */
 import type { YouTubeClient } from '../yt/client.ts';
 import type { IngestRows } from '../db/queries.ts';
@@ -21,6 +27,7 @@ import type {
   Channel,
   ChannelInput,
   CommentRecord,
+  LiveChatMessage,
   TimeAnchor,
   VideoRecord,
 } from '../shared/types.ts';
@@ -28,8 +35,11 @@ import type {
 /** What every step needs from its caller. */
 export interface PipelineContext {
   client: YouTubeClient;
-  /** Run one API call; the caller bills quota and logs it. */
-  call: <T>(label: string, run: () => Promise<T>) => Promise<T>;
+  /**
+   * Run one API call; the caller bills quota and logs it. `units` is the
+   * call's quota cost (`QUOTA_COST`); omitted means 1.
+   */
+  call: <T>(label: string, run: () => Promise<T>, units?: number) => Promise<T>;
   /** Progress line on stdout. */
   log: (message: string) => void;
   /** Log per-video comment counts and timings. */
@@ -46,7 +56,8 @@ export interface PipelineContext {
 export type IngestRowBatch =
   | { channel: Channel }
   | { videos: VideoRecord[] }
-  | { comments: CommentRecord[]; anchors: TimeAnchor[] };
+  | { comments: CommentRecord[]; anchors: TimeAnchor[] }
+  | { chatMessages: LiveChatMessage[] };
 
 /**
  * Where an Ingest's rows go. `emit` is awaited before the stage continues, so
@@ -66,6 +77,16 @@ export interface IngestState {
   videos?: VideoRecord[];
   /** Upcoming Broadcasts the enrich stage skipped, not stored (F3a, #49). */
   skippedVideoIds?: string[];
+  /**
+   * Stored videos whose comments were not captured (`commentsDisabled` /
+   * `videoNotFound`), set by the comments stage (F3b, #52).
+   */
+  commentsSkippedVideoIds?: string[];
+  /**
+   * `videoId → activeLiveChatId` of each on-air Broadcast, set by the enrich
+   * stage; never stored (ADR-0009: the id disappears when the stream ends).
+   */
+  liveChatIds?: Map<string, string>;
 }
 
 /** The context every stage of one Ingest shares. */
@@ -88,14 +109,17 @@ export interface IngestStage {
 /**
  * Run `stages` in order over one shared context and state, emitting into
  * `sink`. Throws whatever a stage or the sink throws; later stages do not run.
+ * `state` (default: a fresh one) lets a later run continue from what an
+ * earlier run's stages left, e.g. the live-chat stage into another sink.
  */
 export async function runIngestStages(
   ctx: PipelineContext,
   input: ChannelInput,
   stages: readonly IngestStage[],
   sink: RowSink,
+  state: IngestState = {},
 ): Promise<IngestState> {
-  const run: IngestRun = { ...ctx, input, state: {}, sink };
+  const run: IngestRun = { ...ctx, input, state, sink };
   for (const stage of stages) {
     await stage.run(run);
   }
@@ -132,6 +156,7 @@ export function createBufferingSink(): BufferingSink {
   const videos: VideoRecord[] = [];
   const comments: CommentRecord[] = [];
   const anchors: TimeAnchor[] = [];
+  const chatMessages: LiveChatMessage[] = [];
   return {
     emit: async (batch) => {
       if ('channel' in batch) {
@@ -139,6 +164,8 @@ export function createBufferingSink(): BufferingSink {
       } else if ('videos' in batch) {
         // Loops, not spread: a Channel can have more rows than call arguments allow.
         for (const video of batch.videos) videos.push(video);
+      } else if ('chatMessages' in batch) {
+        for (const message of batch.chatMessages) chatMessages.push(message);
       } else {
         for (const comment of batch.comments) comments.push(comment);
         for (const anchor of batch.anchors) anchors.push(anchor);
@@ -148,7 +175,9 @@ export function createBufferingSink(): BufferingSink {
       if (channel === undefined) {
         throw new Error('Ingest emitted no Channel');
       }
-      return { channel, videos, comments, anchors };
+      return chatMessages.length > 0
+        ? { channel, videos, comments, anchors, chatMessages }
+        : { channel, videos, comments, anchors };
     },
   };
 }

@@ -36,6 +36,17 @@
  * F3a (#49): the summary line and the `done` report also carry Replies,
  * skipped upcoming Broadcasts and quota used; `comments=` /
  * `comments_written` count top-level CommentRecords only.
+ *
+ * F3b (#52, ADR-0009): `--live-chat` (or `INGEST_CAPTURE_LIVE_CHAT=true`,
+ * set by the workflow) captures the LiveChatMessages of on-air Broadcasts
+ * after the main write, within `--live-chat-budget <units>` (default 3000).
+ * The live-chat stage emits into a flushing sink: each poll's messages are
+ * written at once (one local `db.batch`, or one remote `writer.apply`), so a
+ * run cut off by quota or a crash keeps what it captured. Polls bill
+ * `QUOTA_COST.listLiveChatMessages` units; `sleep` is the polling seam and
+ * `now` also drives the wall-clock cap. The summary line ends in `chat=N`,
+ * `done` reports `chat_messages_written`, and `skipped=` / `skipped_videos`
+ * also count videos skipped for `commentsDisabled` / `videoNotFound`.
  */
 import 'dotenv/config';
 import { API_KEY_FAILURE_MESSAGES, validateApiKey } from '../yt/api-key.ts';
@@ -45,9 +56,15 @@ import type { Transport } from '../yt/client.ts';
 import { QuotaCounter, QuotaExceededError } from '../yt/quota.ts';
 import { openCatalog, type SqliteExecutor } from '../db/sqlite.ts';
 import { createD1RestWriter, type D1RestWriter } from '../db/d1-http.ts';
-import { ingestStatements } from '../db/queries.ts';
+import { ingestStatements, liveChatMessageStatements } from '../db/queries.ts';
 import { ChannelNotFoundError, defaultIngestStages, isQuotaExceeded } from '../ingest/pipeline.ts';
-import { createBufferingSink, runIngestStages, type PipelineContext } from '../ingest/stages.ts';
+import {
+  createBufferingSink,
+  runIngestStages,
+  type PipelineContext,
+  type RowSink,
+} from '../ingest/stages.ts';
+import { createLiveChatStage, DEFAULT_LIVE_CHAT_BUDGET_UNITS } from '../ingest/live-chat.ts';
 import { createIngestStatusReporter, type IngestStatusReporter } from './status.ts';
 import { resolveIngestApiKey } from './unseal.ts';
 import type { ChannelInput } from '../shared/types.ts';
@@ -78,8 +95,10 @@ interface IngestSummary {
   comments: number;
   replies: number;
   anchors: number;
-  /** Upcoming Broadcasts left out of the Catalog. */
+  /** Upcoming Broadcasts left out, plus videos whose comments were skipped. */
   skippedVideos: number;
+  /** LiveChatMessages written (F3b, #52). */
+  chatMessages: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +158,15 @@ export async function runIngest(
     writer?: D1RestWriter;
     /** Override NOW (ms) — used by tests for deterministic `fetchedAt`. */
     now?: () => Date;
+    /**
+     * Capture the live chat of on-air Broadcasts (ADR-0009). Also on when
+     * `INGEST_CAPTURE_LIVE_CHAT` is `true`.
+     */
+    liveChat?: boolean;
+    /** Quota units live-chat polls may spend; defaults to 3000. */
+    liveChatBudget?: number;
+    /** Wait between live-chat polls — injected by tests. Defaults to `setTimeout`. */
+    sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<number> {
   const startTimeMs = Date.now();
@@ -147,6 +175,12 @@ export async function runIngest(
   const dbPath = args.dbPath ?? DEFAULT_DB_PATH;
   const now = args.now ?? ((): Date => new Date());
   const quota = args.quota ?? new QuotaCounter();
+  const liveChat = args.liveChat === true || process.env['INGEST_CAPTURE_LIVE_CHAT'] === 'true';
+  const sleep =
+    args.sleep ??
+    ((ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms)));
+  /** LiveChatMessages written so far; `undefined` until capture starts. */
+  let chatMessagesWritten: number | undefined;
 
   const log = (message: string): void => {
     process.stdout.write(`${message}\n`);
@@ -204,6 +238,7 @@ export async function runIngest(
     const code = reportIngestError(err);
     await statusReporter?.failed(err instanceof Error ? err.message : String(err), {
       quotaUsed: quota.total,
+      ...(chatMessagesWritten !== undefined ? { chatMessages: chatMessagesWritten } : {}),
     });
     return code;
   }
@@ -279,11 +314,11 @@ export async function runIngest(
 
   let warnedQuota = false;
 
-  /** Run one client call, log it under `--verbose`, and bill one quota unit. */
-  async function tracked<T>(label: string, call: () => Promise<T>): Promise<T> {
+  /** Run one client call, log it under `--verbose`, and bill its quota units (default 1). */
+  async function tracked<T>(label: string, call: () => Promise<T>, units = 1): Promise<T> {
     if (verbose) log(`[call] ${label}`);
     const result = await call();
-    quota.consume(1);
+    quota.consume(units);
     if (!warnedQuota && quota.total >= 8000) {
       warnedQuota = true;
       log(QUOTA_WARN);
@@ -318,7 +353,8 @@ export async function runIngest(
     const { videos, comments, anchors } = rows;
     const replies = comments.filter((comment) => (comment.parentId ?? null) !== null).length;
     const topLevel = comments.length - replies;
-    const skippedVideos = state.skippedVideoIds?.length ?? 0;
+    const skippedVideos =
+      (state.skippedVideoIds?.length ?? 0) + (state.commentsSkippedVideoIds?.length ?? 0);
 
     // 10. Persist the whole run: channel → videos → comments (top-level, then
     // Replies) → anchors (FK order). Locally this is one atomic batch (ADR-0001 all-or-nothing);
@@ -331,6 +367,34 @@ export async function runIngest(
       await db.batch(statements);
     }
 
+    // 11. Live chat (opt-in, ADR-0009): after the main write, so every
+    // LiveChatMessage's VideoRecord exists; each poll is flushed at once.
+    let chatMessages = 0;
+    if (liveChat) {
+      chatMessagesWritten = 0;
+      const chatSink: RowSink = {
+        emit: async (batch) => {
+          if (!('chatMessages' in batch)) {
+            throw new Error('live-chat stage emitted a non-chat batch');
+          }
+          const chatStatements = liveChatMessageStatements(batch.chatMessages);
+          if (writer !== undefined) {
+            await writer.apply(chatStatements);
+          } else if (db !== undefined) {
+            await db.batch(chatStatements);
+          }
+          chatMessagesWritten = (chatMessagesWritten ?? 0) + batch.chatMessages.length;
+        },
+      };
+      const chatStage = createLiveChatStage({
+        budgetUnits: args.liveChatBudget ?? DEFAULT_LIVE_CHAT_BUDGET_UNITS,
+        sleep,
+        now,
+      });
+      await runIngestStages(ctx, channelInput, [chatStage], chatSink, state);
+      chatMessages = chatMessagesWritten;
+    }
+
     // Instrumentation only: final counts land with the terminal `done`
     // update, batched into one writer call. Best-effort, never throws.
     if (statusReporter !== undefined) {
@@ -340,6 +404,7 @@ export async function runIngest(
         replies,
         skippedVideos,
         quotaUsed: quota.total,
+        chatMessages,
       });
     }
 
@@ -350,6 +415,7 @@ export async function runIngest(
       replies,
       anchors: anchors.length,
       skippedVideos,
+      chatMessages,
     };
   }
 
@@ -365,7 +431,7 @@ export async function runIngest(
     log(
       `channels=${summary.channels} videos=${summary.videos} comments=${summary.comments} ` +
         `anchors=${summary.anchors} duration=${durationSeconds.toFixed(1)}s quota=${quota.total} ` +
-        `replies=${summary.replies} skipped=${summary.skippedVideos}`,
+        `replies=${summary.replies} skipped=${summary.skippedVideos} chat=${summary.chatMessages}`,
     );
     return 0;
   } catch (err) {
@@ -381,6 +447,10 @@ export interface IngestCliArgs {
   verbose: boolean;
   remote: boolean;
   reportStatus?: string;
+  /** `--live-chat`: capture on-air Broadcasts' chat; set only when given. */
+  liveChat?: boolean;
+  /** `--live-chat-budget <units>`: set only when given. */
+  liveChatBudget?: number;
   /** Set when the flags are invalid; the shim prints `Error: <error>` and exits 1. */
   error?: string;
 }
@@ -388,7 +458,8 @@ export interface IngestCliArgs {
 /**
  * Parse `pnpm ingest` argv (without `node`/script). Flags may appear in any
  * order; the first non-flag argument is the channel. `--report-status` takes
- * its value either as the next argument or inline (`--report-status=<id>`).
+ * its value either as the next argument or inline (`--report-status=<id>`);
+ * so does `--live-chat-budget`, which must be a positive integer.
  */
 export function parseIngestArgs(argv: string[]): IngestCliArgs {
   const parsed: IngestCliArgs = { verbose: false, remote: false };
@@ -398,6 +469,21 @@ export function parseIngestArgs(argv: string[]): IngestCliArgs {
       parsed.verbose = true;
     } else if (arg === '--remote') {
       parsed.remote = true;
+    } else if (arg === '--live-chat') {
+      parsed.liveChat = true;
+    } else if (arg === '--live-chat-budget' || arg.startsWith('--live-chat-budget=')) {
+      const inlineValue = arg.startsWith('--live-chat-budget=')
+        ? arg.slice('--live-chat-budget='.length)
+        : undefined;
+      const value = inlineValue ?? argv[index + 1];
+      if (value === undefined || !/^[1-9]\d*$/.test(value)) {
+        return {
+          ...parsed,
+          error: '--live-chat-budget requires a positive integer <units> value.',
+        };
+      }
+      parsed.liveChatBudget = Number(value);
+      if (inlineValue === undefined) index += 1;
     } else if (arg === '--report-status' || arg.startsWith('--report-status=')) {
       const inlineValue = arg.startsWith('--report-status=')
         ? arg.slice('--report-status='.length)
@@ -437,6 +523,8 @@ if (isCli) {
     verbose: parsed.verbose,
     remote: parsed.remote,
     ...(parsed.reportStatus !== undefined ? { reportStatus: parsed.reportStatus } : {}),
+    ...(parsed.liveChat !== undefined ? { liveChat: parsed.liveChat } : {}),
+    ...(parsed.liveChatBudget !== undefined ? { liveChatBudget: parsed.liveChatBudget } : {}),
   }).then(
     (code) => process.exit(code),
     (err: unknown) => {
