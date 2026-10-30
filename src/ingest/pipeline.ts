@@ -310,68 +310,68 @@ export async function fetchReplies(
 }
 
 /**
- * Step 8: per-video comment pages (1 unit/page): each top-level comment
- * followed by its Replies ({@link fetchReplies}). A video with
- * `commentsDisabled` / `videoNotFound` is skipped; any other error aborts the
- * run; `onSkip` hears each skipped video id. The verbose `comments=` count is
- * top-level comments only.
+ * Step 8: the channel's comment pages (1 unit/page) in one
+ * `allThreadsRelatedToChannelId` stream, so the cost follows the channel's
+ * comment count, not its video count: each top-level comment followed by its
+ * Replies ({@link fetchReplies}). Only threads on `videos` are kept (the
+ * stream also carries channel discussions and skipped Broadcasts), deduped by
+ * id because pages can repeat a thread. A channel with `commentsDisabled`
+ * skips every video, and `onSkip` hears each id; any other error aborts the
+ * run. The verbose `comments=` count is top-level comments only.
  */
 export async function fetchComments(
   ctx: PipelineContext,
+  channelId: string,
   videos: VideoRecord[],
   onSkip: (videoId: string) => void = () => {},
 ): Promise<RawComment[]> {
+  const startedMs = Date.now();
   const rawComments: RawComment[] = [];
-  for (const video of videos) {
-    const videoStartedMs = Date.now();
-    const beforeCount = rawComments.length;
-    let pageToken: string | undefined;
-    try {
-      for (;;) {
-        const page = await ctx.call(`commentThreads.list video=${video.id}`, () =>
-          pageToken === undefined
-            ? ctx.client.listCommentThreads({ videoId: video.id, maxResults: COMMENT_PAGE_SIZE })
-            : ctx.client.listCommentThreads({
-                videoId: video.id,
-                maxResults: COMMENT_PAGE_SIZE,
-                pageToken,
-              }),
-        );
-        for (const thread of page.items) {
-          const topLevel = thread.snippet.topLevelComment;
-          rawComments.push({ videoId: video.id, comment: topLevel });
-          for (const reply of await fetchReplies(ctx, thread)) {
-            rawComments.push({ videoId: video.id, comment: reply, parentId: topLevel.id });
-          }
-        }
-        pageToken = page.nextPageToken;
-        if (pageToken === undefined) break;
-      }
-    } catch (err) {
-      const reason = apiErrorReason(err);
-      if (reason === 'commentsDisabled' || reason === 'videoNotFound') {
-        ctx.log(`[skip] ${video.id}: ${reason}`);
-        onSkip(video.id);
-        continue;
-      }
-      throw err;
-    }
-    if (ctx.verbose) {
-      ctx.log(
-        `[video] ${video.id} comments=${countTopLevel(rawComments, beforeCount)} (${Date.now() - videoStartedMs}ms)`,
+  const videoIds = new Set(videos.map((video) => video.id));
+  const seen = new Set<string>();
+  const perVideo = new Map<string, number>();
+  let pageToken: string | undefined;
+  try {
+    for (;;) {
+      const page = await ctx.call(`commentThreads.list channel=${channelId}`, () =>
+        pageToken === undefined
+          ? ctx.client.listCommentThreads({
+              allThreadsRelatedToChannelId: channelId,
+              maxResults: COMMENT_PAGE_SIZE,
+            })
+          : ctx.client.listCommentThreads({
+              allThreadsRelatedToChannelId: channelId,
+              maxResults: COMMENT_PAGE_SIZE,
+              pageToken,
+            }),
       );
+      for (const thread of page.items) {
+        const topLevel = thread.snippet.topLevelComment;
+        const videoId = thread.snippet.videoId ?? topLevel.snippet.videoId;
+        if (videoId === undefined || !videoIds.has(videoId) || seen.has(topLevel.id)) continue;
+        seen.add(topLevel.id);
+        perVideo.set(videoId, (perVideo.get(videoId) ?? 0) + 1);
+        rawComments.push({ videoId, comment: topLevel });
+        for (const reply of await fetchReplies(ctx, thread)) {
+          rawComments.push({ videoId, comment: reply, parentId: topLevel.id });
+        }
+      }
+      pageToken = page.nextPageToken;
+      if (pageToken === undefined) break;
     }
+  } catch (err) {
+    if (apiErrorReason(err) !== 'commentsDisabled') throw err;
+    ctx.log(`[skip] ${channelId}: commentsDisabled`);
+    for (const video of videos) onSkip(video.id);
+    return [];
+  }
+  if (ctx.verbose) {
+    for (const video of videos) {
+      ctx.log(`[video] ${video.id} comments=${perVideo.get(video.id) ?? 0}`);
+    }
+    ctx.log(`[comments] ${rawComments.length} total (${Date.now() - startedMs}ms)`);
   }
   return rawComments;
-}
-
-/** Top-level entries of `rawComments` from index `from` on. */
-function countTopLevel(rawComments: RawComment[], from: number): number {
-  let count = 0;
-  for (let index = from; index < rawComments.length; index += 1) {
-    if (rawComments[index]?.parentId === undefined) count += 1;
-  }
-  return count;
 }
 
 /**
@@ -466,7 +466,7 @@ export const defaultIngestStages: readonly IngestStage[] = [
       const videos = requireState(run.state, 'videos');
       run.log(`[7/8] Fetching comments for ${videos.length} videos...`);
       const commentsSkippedVideoIds: string[] = [];
-      const rawComments = await fetchComments(run, videos, (videoId) => {
+      const rawComments = await fetchComments(run, channel.id, videos, (videoId) => {
         commentsSkippedVideoIds.push(videoId);
       });
       run.state.commentsSkippedVideoIds = commentsSkippedVideoIds;

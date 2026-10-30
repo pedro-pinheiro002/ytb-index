@@ -48,6 +48,7 @@ const transport: Transport = async (url) => {
         {
           id: 'c1',
           snippet: {
+            videoId: 'v1',
             topLevelComment: {
               id: 'c1',
               snippet: {
@@ -148,7 +149,7 @@ describe('runIngestStages', () => {
         anchors: [{ commentId: 'c1', seconds: 65, rawText: '1:05', charPosition: 3 }],
       },
     ]);
-    assert.deepEqual(calls, ['channels.list', 'videos.list', 'commentThreads.list video=v1']);
+    assert.deepEqual(calls, ['channels.list', 'videos.list', 'commentThreads.list channel=UC1']);
     assert.equal(quota.total, 3);
     assert.equal(buffer.rows().channel.id, 'UC1');
     assert.equal(buffer.rows().comments.length, 1);
