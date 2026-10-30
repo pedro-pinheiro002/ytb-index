@@ -379,7 +379,7 @@ describe('runIngest', () => {
     assert.doesNotMatch(stdout(), /\[call\]/);
   });
 
-  it('skips a video with commentsDisabled and still ingests the rest (exit 0)', async () => {
+  it('ingests a video with commentsDisabled with no comments, without a skip (exit 0)', async () => {
     const { transport } = makeTransport({
       channel: CHANNEL,
       playlistPages: [PLAYLIST_PAGE],
@@ -400,7 +400,9 @@ describe('runIngest', () => {
       id: 'c2',
       video_id: 'vid2',
     });
-    assert.match(stdout(), /\[skip\] vid1: commentsDisabled/);
+    // The channel-wide stream just has no threads for vid1: nothing to skip.
+    assert.doesNotMatch(stdout(), /\[skip\]/);
+    assert.match(stdout(), /skipped=0/);
   });
 
   it('exits 2 and rolls back when the API reports quotaExceeded', async () => {
