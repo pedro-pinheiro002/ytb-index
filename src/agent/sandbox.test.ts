@@ -47,9 +47,8 @@ describe('diagnose — verify runs in the sandbox', () => {
       loadConfig: () => ({
         sentryToken: 's',
         sentryUrl: 'https://sentry.example',
-        opencodeApiKey: 'o',
-        opencodeBaseUrl: 'https://model.example',
-        opencodeModel: 'm',
+        claudeOauthToken: 'o',
+        model: 'm',
         ghToken: 'g',
         telegramBotToken: undefined,
         telegramChatId: undefined,

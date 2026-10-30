@@ -46,9 +46,8 @@ function forbiddenDiff(): string {
 const CONFIG: AgentConfig = {
   sentryToken: 'sentry-token',
   sentryUrl: 'https://sentry.example',
-  opencodeApiKey: 'oc_sk_test',
-  opencodeBaseUrl: 'https://opencode.example/v1',
-  opencodeModel: 'claude-haiku-5-5',
+  claudeOauthToken: 'sk-ant-oat-test',
+  model: 'claude-haiku-5-5',
   ghToken: 'ghp_test',
   telegramBotToken: 'bot-token',
   telegramChatId: '42',
@@ -372,7 +371,7 @@ describe('diagnose — notification settings', () => {
     let seen: TelegramOptions | undefined;
     const { deps } = harness({
       loadConfig: () => {
-        throw new AgentConfigError(['OPENCODE_API_KEY is missing']);
+        throw new AgentConfigError(['CLAUDE_CODE_OAUTH_TOKEN is missing']);
       },
       notify: async (options) => {
         seen = options;
@@ -383,7 +382,7 @@ describe('diagnose — notification settings', () => {
     // Actions substitutes an unset secret with '' — that must not look like a
     // configured bot, or every failure would hit `api.telegram.org/bot/sendMessage`.
     const code = await diagnose(
-      { OPENCODE_API_KEY: '', TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '' },
+      { CLAUDE_CODE_OAUTH_TOKEN: '', TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '' },
       deps,
     );
 
@@ -402,7 +401,7 @@ describe('diagnose — model transport failures', () => {
         if (calls === 1) {
           // What a reasoning model returns when it thinks through the whole
           // `max_tokens` budget: HTTP 200 with an empty `content`.
-          throw new Error('opencode returned an empty completion (finish_reason=length)');
+          throw new Error('claude returned an empty completion (subtype=success)');
         }
         return { content: `\`\`\`diff\n${goodDiff()}\`\`\``, promptTokens: 1, completionTokens: 1 };
       },
@@ -416,7 +415,7 @@ describe('diagnose — model transport failures', () => {
   it('gives up cleanly when every attempt fails in transport', async () => {
     const { deps, state } = harness({
       complete: async () => {
-        throw new Error('opencode 429: rate limited');
+        throw new Error('claude exited 1: rate limited');
       },
     });
 

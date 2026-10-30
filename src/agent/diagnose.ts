@@ -9,7 +9,7 @@
  *      Worker's debounce only covers a single isolate.
  *   3. Fetch the issue and its latest event from Sentry, then read the source
  *      around the in-app frames.
- *   4. Ask OpenCode Go for a unified diff, validate it against the `src/`
+ *   4. Ask Claude (Claude Code CLI) for a unified diff, validate it against the `src/`
  *      allowlist, apply it, and verify with the steps of `pnpm check`, each
  *      in a no-network, no-secrets container (`./sandbox.ts`).
  *      One repair round is allowed, fed with the verifier output.
@@ -45,7 +45,7 @@ import {
   run,
 } from './git.ts';
 import { escapeHtml, notify, type TelegramOptions } from './notify.ts';
-import { complete, type OpenCodeResult } from './opencode.ts';
+import { complete, type CompletionResult } from './claude.ts';
 import { extractDiff, summarizeDiff, validateDiff } from './patch.ts';
 import { buildMessages, buildRepairMessages, type ChatMessage, type Incident } from './prompt.ts';
 import { sandboxArgs } from './sandbox.ts';
@@ -137,14 +137,12 @@ async function proposeAndVerify(
   let lastReason = 'no attempt was made';
 
   for (let attempt = 1; attempt <= config.maxAttempts; attempt += 1) {
-    let completion: OpenCodeResult;
+    let completion: CompletionResult;
     try {
       completion = await deps.complete(messages, {
-        baseUrl: config.opencodeBaseUrl,
-        apiKey: config.opencodeApiKey,
-        model: config.opencodeModel,
+        oauthToken: config.claudeOauthToken,
+        model: config.model,
         maxTokens: config.maxTokens,
-        session: `agent-${incident.issue.shortId}`,
       });
     } catch (error) {
       // A 429, a timeout, or a completion that spent its whole budget on
@@ -154,7 +152,7 @@ async function proposeAndVerify(
       continue;
     }
     deps.log(
-      `[agent] attempt ${attempt}: ${completion.completionTokens} completion tokens (${config.opencodeModel})`,
+      `[agent] attempt ${attempt}: ${completion.completionTokens} completion tokens (${config.model})`,
     );
 
     const diff = extractDiff(completion.content);
@@ -219,7 +217,7 @@ export function prBody(
     `- title: ${issue.title}`,
     `- culprit: ${issue.culprit || '(unknown)'}`,
     `- occurrences: ${issue.count}`,
-    `- model: ${config.opencodeModel}`,
+    `- model: ${config.model}`,
     `- diff: ${summarizeDiff(diff)}`,
     '',
     '## Verification',

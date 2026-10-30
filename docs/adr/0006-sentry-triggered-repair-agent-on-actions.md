@@ -4,7 +4,7 @@ A Sentry issue becomes a reviewed branch without a server: the Worker is wrapped
 
 ## Status
 
-accepted — amended: the verifier is now the steps of `pnpm check` (typecheck, test, format:check, Worker bundle), the same gate as CI, and the model's style and boundary rules come from the `agent-rules` block of `AGENTS.md`. The rest of the decision is unchanged.
+accepted — amended: the verifier is now the steps of `pnpm check` (typecheck, test, format:check, Worker bundle), the same gate as CI, and the model's style and boundary rules come from the `agent-rules` block of `AGENTS.md`. Amended again: the model provider is Claude through the Claude Code CLI run headless (`claude -p`, no tools), authenticated with a Claude Pro/Max subscription token (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`) instead of OpenCode Go; the cost is the subscription's usage limits, not per token. The rest of the decision is unchanged.
 
 ## Considered Options
 
