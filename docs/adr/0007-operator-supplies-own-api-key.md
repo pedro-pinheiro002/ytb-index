@@ -4,7 +4,7 @@ v2 lets the Operator pay for an Ingest with their own YouTube Data API key (the 
 
 ## Status
 
-accepted. Amends ADR-0002 and ADR-0003: the read server now makes exactly one kind of outbound YouTube call, key validation, and does it without importing `src/yt`.
+accepted. Amends ADR-0002 and ADR-0003: the read server now makes exactly one kind of outbound YouTube call, key validation, and does it without importing `src/yt`. Amended by ADR-0011: the browser also sends the OperatorKey straight to YouTube for LiveSearch.
 
 ## Considered Options
 

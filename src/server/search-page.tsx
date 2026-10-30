@@ -11,12 +11,18 @@
  * `./highlight.ts` computes and interpolating each slice, so record text is
  * never injected as markup.
  *
+ * With terms and one Channel picked, the page also carries a hidden
+ * LiveSearch section (ADR-0011): its script shows it only when the browser
+ * holds an OperatorKey, and then asks YouTube directly; nothing reaches the
+ * Worker or the Catalog.
+ *
  * Pure and side-effect free: no database, no clock beyond `relativeDate`.
  */
-import { html } from 'hono/html';
+import { html, raw } from 'hono/html';
 import { DEFAULT_SEARCH_KINDS, SEARCH_MAX_PAGE, type SearchPage } from '../db/catalog-search.ts';
 import type { SearchHit, SearchHitKind, SearchSort } from '../shared/types.ts';
 import { matchRanges } from './highlight.ts';
+import { liveSearchScript } from './live-search-script.ts';
 import { chatElementId, commentElementId, WATCH_URL } from './links.ts';
 import { emptyState, formatCount, formatTimestamp, icon, page, relativeDate } from './ssr.tsx';
 import type { Html } from './ssr.tsx';
@@ -351,17 +357,54 @@ function stateBody(params: URLSearchParams, state: SearchPageState): Html {
 }
 
 /**
+ * The LiveSearch section for terms `q` on Channel `channel` (ADR-0011).
+ * Rendered `hidden`; the script reveals it when an OperatorKey is stored.
+ */
+function liveSearchSection(q: string, channel: SearchChannelOption): Html {
+  return html`<section
+    id="live-search"
+    class="live-search card"
+    aria-labelledby="live-search-title"
+    data-channel="${channel.id}"
+    data-q="${q}"
+    hidden
+  >
+    <h2 id="live-search-title">Search ${channel.title} live on YouTube</h2>
+    <p class="live-search-note">
+      Asks YouTube straight from this browser with your OperatorKey, for comments the Catalog may
+      not have yet: 1 to 3 units of your quota per search. Nothing is stored. YouTube matches whole
+      words and does not fold accents, so <q>video</q> does not find <q>vídeo</q>.
+    </p>
+    <p><button id="live-search-run" class="btn btn-tonal" type="button">Search live</button></p>
+    <p id="live-search-status" class="live-search-status" role="status" aria-live="polite"></p>
+    <ol id="live-search-hits" class="search-hits"></ol>
+  </section>`;
+}
+
+/**
  * Render the `/search` page: the GET form, then the empty state, the inline
- * errors (the route answers those with HTTP 400) or one page of SearchHits.
+ * errors (the route answers those with HTTP 400) or one page of SearchHits,
+ * then the LiveSearch section when terms and a Channel are set.
  */
 export function renderSearch(model: SearchPageModel): string {
   const q = value(model.params, 'q').trim();
   const title = q === '' ? 'Search — ytb-index' : `${q} — Search — ytb-index`;
+  const channelId = value(model.params, 'channel');
+  const channel = model.channels.find((option) => option.id === channelId);
+  const live = q !== '' && model.state.type !== 'invalid' && channel !== undefined;
   return page(
     title,
     html`<section class="search-page" aria-labelledby="search-title">
       <h1 id="search-title">Search</h1>
       ${searchForm(model.params, model.channels)} ${stateBody(model.params, model.state)}
+      ${live ? liveSearchSection(q, channel) : ''}
     </section>`,
+    live
+      ? {
+          scripts: html`<script>
+            ${raw(liveSearchScript())};
+          </script>`,
+        }
+      : {},
   );
 }

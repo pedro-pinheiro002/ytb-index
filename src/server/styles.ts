@@ -506,6 +506,15 @@ button, input, select { font: inherit; color: inherit; }
 }
 .search-hit-links { display: flex; flex-wrap: wrap; gap: 4px; margin-left: -12px; }
 .search-pagination { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 8px 0; }
+.live-search { padding: 16px 20px; display: grid; gap: 8px; }
+.live-search[hidden] { display: none; }
+.live-search h2 { font: var(--md-sys-typescale-title-medium); }
+.live-search-note, .live-search-status { font: var(--md-sys-typescale-body-small); color: var(--md-sys-color-on-surface-variant); }
+.live-search-replies {
+  list-style: none; margin: 4px 0 0; padding-left: 12px; display: grid; gap: 8px;
+  border-left: 3px solid var(--md-sys-color-primary);
+}
+.search-kind-live { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
 
 /* Video page v2: Broadcast line, nested Replies, Live chat panel (F7 #54) */
 .broadcast-line {
