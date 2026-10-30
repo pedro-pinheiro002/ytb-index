@@ -8,7 +8,7 @@ See [`docs/spec/v1.md`](docs/spec/v1.md) for the v1 specification, [`docs/spec/v
 
 ## What you get
 
-- **Ingest pipeline** (`pnpm ingest <channel>`) — pulls a channel's uploads playlist, enriches videos in batches of 50, pages every video's top-level comments, and detects timestamps in the comment text.
+- **Ingest pipeline** (`pnpm ingest <channel>`) — pulls a channel's uploads playlist, enriches videos in batches of 50, pages the channel's comments in one channel-wide stream (1 quota unit per 100 threads), and detects timestamps in the comment text.
 - **Static web catalog** (`pnpm dev` / `pnpm start`) — two SSR routes (`/`, `/v/:videoId`) over the SQLite file. The server never calls the YouTube API.
 - **Click-to-jump anchors** — every `TimeAnchor` (matched `h:mm:ss` and sentinel-anchored `mm:ss`) renders as `https://www.youtube.com/watch?v={id}&t={s}s` in a new tab.
 - **TTL redaction** — comment bodies past 30 days from `fetched_at` are replaced at read time with `[Comment text expired — refresh to recover]`; anchor links survive. See [ADR-0001](docs/adr/0001-ttl-policy.md).
@@ -111,6 +111,8 @@ Then open:
 | `page` | 25 hits per page, up to page 40. |
 
 Each SearchHit links to `/v/<videoId>#c-<commentId>` (or `#m-<messageId>` for chat) and to YouTube: at the first TimeAnchor (`&t=83s`), at a chat message's offset, or, for a comment without anchors, with `&lc=<commentId>`. Invalid params show an inline message with HTTP 400. Expired comments and chat never match.
+
+**LiveSearch (Operator).** With `q` and a `channel` set, an Operator whose browser holds an OperatorKey also gets a "Search live" button. It asks YouTube directly from the browser (`commentThreads.list` with `allThreadsRelatedToChannelId` + `searchTerms`), 1–3 units of the OperatorKey's quota per search, and finds comments the Catalog does not have yet. The Worker never sees the key or the results, and nothing is stored. YouTube matches whole words and does not fold accents ([ADR-0011](docs/adr/0011-live-search-from-the-operators-browser.md)).
 
 ### Run the Worker locally
 

@@ -68,6 +68,10 @@ _Avoid_: search request, filter, query string, lookup
 One CommentRecord, LiveChatMessage, or VideoRecord matched by a SearchQuery, together with where it points in its source video.
 _Avoid_: result row, match, hit row, search result entry
 
+**LiveSearch**:
+An Operator's keyword search over one Channel's comments, sent from the browser straight to YouTube with the OperatorKey; its results are shown once and never stored. Separate from a SearchQuery.
+_Avoid_: live query, YouTube search (that is `search.list`), comment search
+
 ## Derived
 
 **TimestampedComment**:

@@ -214,9 +214,13 @@ const transport: Transport = async (url) => {
   if (path.endsWith('/playlistItems')) return json(PLAYLIST);
   if (path.endsWith('/videos')) return json({ items: VIDEOS });
   if (path.endsWith('/commentThreads')) {
-    const thread = COMMENT_THREADS[parsed.searchParams.get('videoId') ?? ''];
-    if (thread === undefined) throw new Error(`fake transport: no threads for ${url}`);
-    return json(thread);
+    // Channel-wide stream: every video's threads, each naming its video.
+    assert.equal(parsed.searchParams.get('allThreadsRelatedToChannelId'), CHANNEL_ID);
+    return json({
+      items: Object.entries(COMMENT_THREADS).flatMap(([videoId, page]) =>
+        page.items.map((thread) => ({ ...thread, snippet: { ...thread.snippet, videoId } })),
+      ),
+    });
   }
   if (path.endsWith('/liveChat/messages')) {
     assert.equal(parsed.searchParams.get('liveChatId'), 'chat1');
@@ -364,10 +368,11 @@ describe('v2 end to end: Ingest with live chat, then /search and the video page 
     const summary = output.join('');
     assert.match(
       summary,
-      /channels=1 videos=2 comments=2 anchors=1 duration=\d+\.\ds quota=15 replies=1 skipped=0 chat=2\n/,
+      /channels=1 videos=2 comments=2 anchors=1 duration=\d+\.\ds quota=14 replies=1 skipped=0 chat=2\n/,
     );
-    // channels + playlistItems + videos + commentThreads ×2, then 5 per chat poll.
-    assert.equal(quota.total, 15);
+    // channels + playlistItems + videos + one channel-wide commentThreads page,
+    // then 5 per chat poll.
+    assert.equal(quota.total, 14);
     // One wait between the two polls, none after the offline page.
     assert.deepEqual(sleeps, [5000]);
   });

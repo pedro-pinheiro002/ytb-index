@@ -44,10 +44,11 @@ function video(id: string, thumbnails: VideoResource['snippet']['thumbnails'] = 
   };
 }
 
-function thread(id: string, text: string): CommentThread {
+function thread(id: string, text: string, videoId = 'v1'): CommentThread {
   return {
     id,
     snippet: {
+      videoId,
       topLevelComment: {
         id,
         snippet: { authorDisplayName: 'a', textOriginal: text, publishedAt: FETCHED_AT },
@@ -288,27 +289,44 @@ describe('toVideoRecord', () => {
 });
 
 describe('fetchComments', () => {
-  const videos = [{ id: 'v1' }, { id: 'v2' }, { id: 'v3' }] as VideoRecord[];
+  const videos = [{ id: 'v1' }, { id: 'v2' }] as VideoRecord[];
 
-  it('pages each video and skips commentsDisabled / videoNotFound', async () => {
-    const { ctx, logs } = context({
-      listCommentThreads: async ({ videoId, pageToken }: ListCommentThreadsParams) => {
-        if (videoId === 'v2') throw googleError(403, 'commentsDisabled');
-        if (videoId === 'v3') throw googleError(404, 'videoNotFound');
-        return pageToken === undefined
-          ? { items: [thread('c1', 'a')], nextPageToken: 'p2' }
-          : { items: [thread('c2', 'b')] };
+  it('pages one channel-wide stream, keeping only threads on the given videos', async () => {
+    const requests: ListCommentThreadsParams[] = [];
+    const { ctx, calls } = context({
+      listCommentThreads: async (params: ListCommentThreadsParams) => {
+        requests.push(params);
+        return params.pageToken === undefined
+          ? { items: [thread('c1', 'a', 'v1'), thread('x1', 'a', 'other')], nextPageToken: 'p2' }
+          : // c1 again: a new comment shifted the stream between pages.
+            { items: [thread('c1', 'a', 'v1'), thread('c2', 'b', 'v2')] };
       },
     });
-    const raw = await fetchComments(ctx, videos);
+    const raw = await fetchComments(ctx, 'UC1', videos);
     assert.deepEqual(
       raw.map((entry) => [entry.videoId, entry.comment.id]),
       [
         ['v1', 'c1'],
-        ['v1', 'c2'],
+        ['v2', 'c2'],
       ],
     );
-    assert.deepEqual(logs, ['[skip] v2: commentsDisabled', '[skip] v3: videoNotFound']);
+    assert.deepEqual(calls, ['commentThreads.list channel=UC1', 'commentThreads.list channel=UC1']);
+    assert.equal(requests[0]?.allThreadsRelatedToChannelId, 'UC1');
+    assert.equal(requests[0]?.videoId, undefined);
+    assert.equal(requests[1]?.pageToken, 'p2');
+  });
+
+  it('skips every video when the channel has commentsDisabled', async () => {
+    const skipped: string[] = [];
+    const { ctx, logs } = context({
+      listCommentThreads: async () => {
+        throw googleError(403, 'commentsDisabled');
+      },
+    });
+    const raw = await fetchComments(ctx, 'UC1', videos, (id) => skipped.push(id));
+    assert.deepEqual(raw, []);
+    assert.deepEqual(skipped, ['v1', 'v2']);
+    assert.deepEqual(logs, ['[skip] UC1: commentsDisabled']);
   });
 
   it('follows each top-level comment with its embedded Replies', async () => {
@@ -325,7 +343,7 @@ describe('fetchComments', () => {
         ],
       }),
     });
-    const raw = await fetchComments(ctx, [{ id: 'v1' }] as VideoRecord[]);
+    const raw = await fetchComments(ctx, 'UC1', [{ id: 'v1' }] as VideoRecord[]);
     assert.deepEqual(
       raw.map((entry) => [entry.comment.id, entry.parentId]),
       [
@@ -334,7 +352,7 @@ describe('fetchComments', () => {
         ['c2', undefined],
       ],
     );
-    assert.deepEqual(calls, ['commentThreads.list video=v1']);
+    assert.deepEqual(calls, ['commentThreads.list channel=UC1']);
   });
 
   it('rethrows any other API error', async () => {
@@ -343,13 +361,14 @@ describe('fetchComments', () => {
         throw googleError(403, 'quotaExceeded');
       },
     });
-    await assert.rejects(fetchComments(ctx, videos), ApiError);
+    await assert.rejects(fetchComments(ctx, 'UC1', videos), ApiError);
   });
 
   it('logs per-video counts under verbose', async () => {
     const { ctx, logs } = context({ listCommentThreads: async () => ({ items: [] }) }, true);
-    await fetchComments(ctx, [{ id: 'v1' }] as VideoRecord[]);
-    assert.match(logs[0] ?? '', /^\[video\] v1 comments=0 \(\d+ms\)$/);
+    await fetchComments(ctx, 'UC1', [{ id: 'v1' }] as VideoRecord[]);
+    assert.equal(logs[0], '[video] v1 comments=0');
+    assert.match(logs[1] ?? '', /^\[comments\] 0 total \(\d+ms\)$/);
   });
 });
 

@@ -285,6 +285,30 @@ describe('createYouTubeClient', () => {
 
     assert.equal(new URL(firstUrl(calls)).searchParams.get('pageToken'), 'C2');
   });
+
+  it('listCommentThreads pages a whole channel with allThreadsRelatedToChannelId', async () => {
+    const { transport, calls } = scriptedTransport([() => jsonResponse(commentThreadsEnvelope)]);
+    const client = makeClient(transport);
+
+    await client.listCommentThreads({ allThreadsRelatedToChannelId: 'UC123' });
+
+    const url = new URL(firstUrl(calls));
+    assert.equal(url.searchParams.get('allThreadsRelatedToChannelId'), 'UC123');
+    assert.equal(url.searchParams.get('videoId'), null);
+  });
+
+  it('listCommentThreads rejects both or neither filter before any request', async () => {
+    const { transport, calls } = scriptedTransport([]);
+    const client = makeClient(transport);
+
+    for (const params of [{}, { videoId: 'vid1', allThreadsRelatedToChannelId: 'UC123' }]) {
+      await assert.rejects(
+        () => client.listCommentThreads(params),
+        (error: unknown) => error instanceof UsageError,
+      );
+    }
+    assert.equal(calls.length, 0);
+  });
 });
 
 // ---------------------------------------------------------------------------

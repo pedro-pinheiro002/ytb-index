@@ -23,7 +23,8 @@
  *  - playlistItems.list  `part=snippet` + `playlistId` + `maxResults` + `pageToken`
  *  - videos.list         `part=snippet,contentDetails,statistics,liveStreamingDetails`
  *                        + `id` (≤ 50)
- *  - commentThreads.list `part=snippet,replies` + `videoId` + `maxResults` + `pageToken`
+ *  - commentThreads.list `part=snippet,replies` + (`allThreadsRelatedToChannelId` | `videoId`)
+ *                        + `maxResults` + `pageToken`
  *  - comments.list       `part=snippet` + `parentId` + `maxResults` (≤ 100) + `pageToken`
  *  - liveChatMessages.list  `GET liveChat/messages`, `part=snippet,authorDetails`
  *                        + `liveChatId` + optional `maxResults` (200–2000) + `pageToken`
@@ -265,6 +266,8 @@ export interface CommentResource {
 export interface CommentThread {
   id: string;
   snippet: {
+    /** The video the thread belongs to; absent on channel discussions. */
+    videoId?: string;
     topLevelComment: CommentResource;
     /** Total Replies to the top-level comment (may exceed `replies.comments`). */
     totalReplyCount?: number;
@@ -341,8 +344,11 @@ export interface ListVideosParams {
   id: string[];
 }
 
+/** Exactly one of `allThreadsRelatedToChannelId` or `videoId`. */
 export interface ListCommentThreadsParams {
-  videoId: string;
+  /** Every thread across the channel's videos, in one paged stream. */
+  allThreadsRelatedToChannelId?: string;
+  videoId?: string;
   pageToken?: string;
   maxResults?: number;
 }
@@ -504,8 +510,14 @@ export function createYouTubeClient(options: YouTubeClientOptions): YouTubeClien
     },
 
     async listCommentThreads(params) {
+      if ((params.allThreadsRelatedToChannelId === undefined) === (params.videoId === undefined)) {
+        throw new UsageError(
+          'listCommentThreads requires exactly one of `allThreadsRelatedToChannelId` or `videoId`',
+        );
+      }
       const url = buildUrl('commentThreads', {
         part: 'snippet,replies',
+        allThreadsRelatedToChannelId: params.allThreadsRelatedToChannelId,
         videoId: params.videoId,
         maxResults: String(params.maxResults ?? 100),
         pageToken: params.pageToken,

@@ -4,7 +4,7 @@ A SearchQuery runs over the Catalog only, never `search.list` (it has its own 10
 
 ## Status
 
-accepted
+accepted. Amended by ADR-0011: `/search` may also show a separate LiveSearch section that runs in the Operator's browser; the SearchQuery itself still reads the Catalog only.
 
 ## Considered Options
 

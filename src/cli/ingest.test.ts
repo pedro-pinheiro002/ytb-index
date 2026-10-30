@@ -146,8 +146,11 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/** The Google `reason` of each fake error `Response`, for the channel-wide fake. */
+const ERROR_REASONS = new WeakMap<Response, string>();
+
 function apiErrorResponse(code: number, reason: string, message = 'api error'): Response {
-  return jsonResponse(
+  const response = jsonResponse(
     {
       error: {
         code,
@@ -158,6 +161,31 @@ function apiErrorResponse(code: number, reason: string, message = 'api error'): 
     },
     code,
   );
+  ERROR_REASONS.set(response, reason);
+  return response;
+}
+
+/**
+ * The fake's channel-wide `commentThreads.list` (`allThreadsRelatedToChannelId`):
+ * every video's threads in one page, as YouTube streams them. A video whose
+ * entry is a `commentsDisabled` error simply has no threads in the stream; any
+ * other error `Response` becomes the channel-wide answer.
+ */
+function channelCommentThreads(parsed: URL, config: FakeConfig): Response {
+  if (parsed.searchParams.get('allThreadsRelatedToChannelId') !== config.channel?.id) {
+    throw new Error(`fake transport: expected a channel-wide comment request, got ${parsed}`);
+  }
+  const items: CommentThread[] = [];
+  for (const [videoId, entry] of Object.entries(config.comments ?? {})) {
+    if (entry instanceof Response) {
+      if (ERROR_REASONS.get(entry) === 'commentsDisabled') continue;
+      return entry;
+    }
+    for (const thread of entry.items) {
+      items.push({ ...thread, snippet: { ...thread.snippet, videoId } });
+    }
+  }
+  return jsonResponse({ items });
 }
 
 function makeTransport(config: FakeConfig): { transport: Transport; calls: string[] } {
@@ -194,12 +222,7 @@ function makeTransport(config: FakeConfig): { transport: Transport; calls: strin
     }
 
     if (path.endsWith('/commentThreads')) {
-      const videoId = parsed.searchParams.get('videoId') ?? '';
-      const entry = config.comments?.[videoId];
-      if (entry === undefined) {
-        throw new Error(`fake transport: no comment response for ${videoId}`);
-      }
-      return entry instanceof Response ? entry : jsonResponse(entry);
+      return channelCommentThreads(parsed, config);
     }
 
     if (path.endsWith('/comments')) {
@@ -356,7 +379,7 @@ describe('runIngest', () => {
     assert.doesNotMatch(stdout(), /\[call\]/);
   });
 
-  it('skips a video with commentsDisabled and still ingests the rest (exit 0)', async () => {
+  it('ingests a video with commentsDisabled with no comments, without a skip (exit 0)', async () => {
     const { transport } = makeTransport({
       channel: CHANNEL,
       playlistPages: [PLAYLIST_PAGE],
@@ -377,7 +400,9 @@ describe('runIngest', () => {
       id: 'c2',
       video_id: 'vid2',
     });
-    assert.match(stdout(), /\[skip\] vid1: commentsDisabled/);
+    // The channel-wide stream just has no threads for vid1: nothing to skip.
+    assert.doesNotMatch(stdout(), /\[skip\]/);
+    assert.match(stdout(), /skipped=0/);
   });
 
   it('exits 2 and rolls back when the API reports quotaExceeded', async () => {
@@ -636,13 +661,13 @@ describe('runIngest', () => {
     const done = statusApplied[1]![0]!;
     assert.match(done.sql, /status = 'done'/);
     assert.match(done.sql, /finished_at = \?/);
-    // videos, comments, replies, skipped_videos, quota_used (5 calls), chat messages.
+    // videos, comments, replies, skipped_videos, quota_used (4 calls), chat messages.
     assert.deepEqual(done.params, [
       2,
       2,
       0,
       0,
-      5,
+      4,
       0,
       '2024-03-01T00:00:00.000Z',
       '2024-03-01T00:00:00.000Z',
@@ -985,14 +1010,14 @@ describe('runIngest v2: Broadcasts and Replies (F3a)', () => {
     });
 
     assert.equal(code, 0, stderr());
-    // channels + playlistItems + videos + commentThreads ×2 (up1, bc1; the failed
-    // off1 call is not billed, as in v1) + comments.list ×2 (c2's Replies).
-    // Nothing at all for the upcoming Broadcast.
-    assert.equal(quota.total, 7);
+    // channels + playlistItems + videos + one channel-wide commentThreads page +
+    // comments.list ×2 (c2's Replies). Nothing at all for the upcoming Broadcast.
+    assert.equal(quota.total, 6);
     assert.equal(calls.filter((url) => url.includes('videoId=soon1')).length, 0);
     assert.equal(calls.filter((url) => new URL(url).pathname.endsWith('/comments')).length, 2);
     assert.match(stdout(), /\[skip\] soon1: upcoming Broadcast/);
-    assert.match(stdout(), /\[skip\] off1: commentsDisabled/);
+    // A video with comments disabled just has no threads in the channel-wide stream.
+    assert.doesNotMatch(stdout(), /\[skip\] off1/);
 
     const statements = applied[0]!;
     const videos = statements.filter((s) => /INSERT INTO videos/.test(s.sql));
@@ -1053,7 +1078,7 @@ describe('runIngest v2: Broadcasts and Replies (F3a)', () => {
 
     assert.match(
       stdout(),
-      /channels=1 videos=3 comments=2 anchors=3 duration=\d+\.\ds quota=7 replies=4 skipped=2/,
+      /channels=1 videos=3 comments=2 anchors=3 duration=\d+\.\ds quota=6 replies=4 skipped=1/,
     );
   });
 
@@ -1158,8 +1183,8 @@ describe('runIngest v2: Broadcasts and Replies (F3a)', () => {
       3,
       2,
       4,
-      2,
-      7,
+      1,
+      6,
       0,
       '2024-03-01T00:00:00.000Z',
       '2024-03-01T00:00:00.000Z',
@@ -1335,8 +1360,8 @@ describe('runIngest v2: live-chat capture (F3b)', () => {
     assert.equal(new URL(polls[1]!).searchParams.get('pageToken'), '1');
     // Waits the server's interval between polls, not after the offline page.
     assert.deepEqual(clock.sleeps, [5000]);
-    // channels + playlistItems + videos + commentThreads ×2 = 5, then 5 per poll.
-    assert.equal(quota.total, 15);
+    // channels + playlistItems + videos + commentThreads = 4, then 5 per poll.
+    assert.equal(quota.total, 14);
 
     // The main write first, then one apply per poll.
     assert.equal(applied.length, 3);
@@ -1394,7 +1419,7 @@ describe('runIngest v2: live-chat capture (F3b)', () => {
     assert.match(stdout(), /\[chat\] live1 messages=3 polls=2 units=10/);
     assert.match(
       stdout(),
-      /channels=1 videos=2 comments=0 anchors=0 duration=\d+\.\ds quota=15 replies=0 skipped=0 chat=3\n/,
+      /channels=1 videos=2 comments=0 anchors=0 duration=\d+\.\ds quota=14 replies=0 skipped=0 chat=3\n/,
     );
   });
 
@@ -1462,7 +1487,7 @@ describe('runIngest v2: live-chat capture (F3b)', () => {
     assert.equal(code, 0, stderr());
     // 5 + 5 = 10 units; a third poll would reach 15 > 12.
     assert.equal(chatCalls(calls).length, 2);
-    assert.equal(quota.total, 5 + 10);
+    assert.equal(quota.total, 4 + 10);
     assert.deepEqual(
       chatStatements(applied).map((s) => paramOf(s, 'id')),
       ['e0', 'e1'],
@@ -1629,7 +1654,7 @@ describe('runIngest v2: live-chat capture (F3b)', () => {
     assert.match(done.sql, /status = 'done'/);
     assert.match(done.sql, /chat_messages_written = \?/);
     // videos, comments, replies, skipped, quota, chat messages.
-    assert.deepEqual((done.params ?? []).slice(0, 6), [2, 0, 0, 0, 15, 3]);
+    assert.deepEqual((done.params ?? []).slice(0, 6), [2, 0, 0, 0, 14, 3]);
   });
 
   it('reports chat_messages_written with failed when capture had started', async () => {
@@ -1657,7 +1682,7 @@ describe('runIngest v2: live-chat capture (F3b)', () => {
     assert.match(failed.sql, /status = 'failed'/);
     assert.match(failed.sql, /quota_used = \?, chat_messages_written = \?/);
     // error, updated_at, finished_at, quota_used, chat_messages_written, id.
-    assert.deepEqual((failed.params ?? []).slice(3, 5), [10, 1]);
+    assert.deepEqual((failed.params ?? []).slice(3, 5), [9, 1]);
   });
 });
 
