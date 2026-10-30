@@ -34,8 +34,10 @@ jobs:
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       SENTRY_URL: https://sentry.io
 
-      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-      OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || 'claude-haiku-5-5' }}
+      # Claude Pro/Max subscription token from `claude setup-token`; the agent
+      # runs the Claude Code CLI headless, so no Anthropic API key is needed.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AGENT_MODEL: ${{ vars.AGENT_MODEL || 'claude-haiku-5-5' }}
 
       # A PAT is preferred over GITHUB_TOKEN: pushes made with GITHUB_TOKEN do
       # not trigger workflows, so the PR would arrive without CI checks.
@@ -64,6 +66,9 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # The model runs through the Claude Code CLI (src/agent/claude.ts).
+      - run: npm install -g @anthropic-ai/claude-code@2.1.312
 
       - name: Diagnose and open draft PR
         run: pnpm exec tsx src/agent/diagnose.ts
