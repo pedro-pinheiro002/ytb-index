@@ -53,8 +53,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Same token as GH_TOKEN so `git push` and `gh` share credentials.
           token: ${{ secrets.AGENT_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+          # The verify steps run model-written code (src/agent/sandbox.ts), so
+          # no token may sit in .git/config; git authenticates per command
+          # through `gh auth git-credential` with GH_TOKEN (src/agent/git.ts).
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
 

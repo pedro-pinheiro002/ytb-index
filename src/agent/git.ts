@@ -9,6 +9,14 @@
  */
 import { spawnSync } from 'node:child_process';
 
+/**
+ * Per-command credentials for talking to `origin`. The checkout keeps none
+ * (`persist-credentials: false`), so the sandboxed verify steps cannot read a
+ * token from `.git/config`; `gh` hands `GH_TOKEN` to each remote command and
+ * nothing is written to disk.
+ */
+const GH_AUTH = ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential'];
+
 /** Outcome of a subprocess: exit status plus merged stdout/stderr. */
 export interface CommandResult {
   ok: boolean;
@@ -57,7 +65,11 @@ export function branchName(shortId: string): string {
 
 /** True when the remote already has this branch (the authoritative dedup). */
 export function remoteBranchExists(cwd: string, branch: string): boolean {
-  const result = run('git', ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`], { cwd });
+  const result = run(
+    'git',
+    [...GH_AUTH, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+    { cwd },
+  );
   return result.ok && result.output.trim() !== '';
 }
 
@@ -87,7 +99,7 @@ export function commitAndPush(cwd: string, branch: string, message: string): voi
   git(cwd, ['switch', '-c', branch]);
   git(cwd, ['add', '--', 'src']);
   git(cwd, ['commit', '-m', message]);
-  git(cwd, ['push', '--set-upstream', 'origin', branch]);
+  git(cwd, [...GH_AUTH, 'push', '--set-upstream', 'origin', branch]);
 }
 
 /** Open a draft PR and return its URL (the last line `gh` prints). */

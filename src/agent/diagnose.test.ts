@@ -228,7 +228,7 @@ describe('diagnose — propose and verify', () => {
     let typecheckCalls = 0;
     const { deps, state } = harness({
       run: (command, args) => {
-        if (args[0] === 'typecheck') {
+        if (args.at(-1) === 'typecheck') {
           typecheckCalls += 1;
           if (typecheckCalls === 1) {
             return { ok: false, status: 2, output: "error TS2304: Cannot find name 'b'" };

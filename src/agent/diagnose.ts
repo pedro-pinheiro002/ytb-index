@@ -10,7 +10,8 @@
  *   3. Fetch the issue and its latest event from Sentry, then read the source
  *      around the in-app frames.
  *   4. Ask OpenCode Go for a unified diff, validate it against the `src/`
- *      allowlist, apply it, and verify with the steps of `pnpm check`.
+ *      allowlist, apply it, and verify with the steps of `pnpm check`, each
+ *      in a no-network, no-secrets container (`./sandbox.ts`).
  *      One repair round is allowed, fed with the verifier output.
  *   5. On success: push `agent/fix-<short-id>` and open a **draft** PR.
  *      On failure: notify and exit non-zero.
@@ -21,6 +22,7 @@
  * Every side effect goes through `DiagnoseDeps`: the pipeline is testable
  * without GitHub, Sentry, a model, or a working tree.
  */
+import { resolve } from 'node:path';
 import {
   AgentConfigError,
   loadConfig,
@@ -46,6 +48,7 @@ import { escapeHtml, notify, type TelegramOptions } from './notify.ts';
 import { complete, type OpenCodeResult } from './opencode.ts';
 import { extractDiff, summarizeDiff, validateDiff } from './patch.ts';
 import { buildMessages, buildRepairMessages, type ChatMessage, type Incident } from './prompt.ts';
+import { sandboxArgs } from './sandbox.ts';
 import { fetchIssue, fetchLatestEvent, type SentryEvent, type SentryIssue } from './sentry.ts';
 
 /** Outcome of the propose/verify loop. */
@@ -106,8 +109,17 @@ export const VERIFY_STEPS = ['typecheck', 'test', 'format:check', 'build:worker'
 
 /** Run the repository's own checks; output is fed back to the model on failure. */
 function verify(deps: DiagnoseDeps, repoRoot: string): { ok: boolean; output: string } {
+  const sandbox = {
+    repoRoot: resolve(repoRoot),
+    uid: process.getuid?.() ?? 0,
+    gid: process.getgid?.() ?? 0,
+  };
   for (const step of VERIFY_STEPS) {
-    const result = deps.run('pnpm', [step], { cwd: repoRoot, timeoutMs: 900_000 });
+    // Model-written code runs here: isolate it from the job's secrets.
+    const result = deps.run('docker', sandboxArgs(step, sandbox), {
+      cwd: repoRoot,
+      timeoutMs: 900_000,
+    });
     if (!result.ok) {
       return { ok: false, output: `pnpm ${step} failed:\n${result.output.slice(-4000)}` };
     }
