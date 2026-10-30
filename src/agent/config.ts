@@ -30,12 +30,10 @@ export interface AgentConfig {
   sentryToken: string;
   /** Sentry origin, no trailing slash. */
   sentryUrl: string;
-  /** OpenCode Go API key. */
-  opencodeApiKey: string;
-  /** OpenAI-compatible base URL. */
-  opencodeBaseUrl: string;
-  /** Model id passed to the API. */
-  opencodeModel: string;
+  /** Claude Code OAuth token (`claude setup-token`, Pro/Max subscription). */
+  claudeOauthToken: string;
+  /** Model id or alias passed to `claude --model`. */
+  model: string;
   /** GitHub token used by `git push` and `gh`. */
   ghToken: string;
   /** Telegram bot token, optional: notifications degrade to logs. */
@@ -102,11 +100,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
   const config: AgentConfig = {
     sentryToken: required(env, 'SENTRY_AUTH_TOKEN', missing),
     sentryUrl: (optional(env, 'SENTRY_URL') ?? 'https://sentry.io').replace(/\/+$/, ''),
-    opencodeApiKey: required(env, 'OPENCODE_API_KEY', missing),
-    opencodeBaseUrl: (
-      optional(env, 'OPENCODE_BASE_URL') ?? 'https://opencode.ai/inference/go/openai/v1'
-    ).replace(/\/+$/, ''),
-    opencodeModel: optional(env, 'OPENCODE_MODEL') ?? 'claude-haiku-5-5',
+    claudeOauthToken: required(env, 'CLAUDE_CODE_OAUTH_TOKEN', missing),
+    model: optional(env, 'AGENT_MODEL') ?? 'claude-haiku-5-5',
     ghToken: required(env, 'GH_TOKEN', missing),
     telegramBotToken: optional(env, 'TELEGRAM_BOT_TOKEN'),
     telegramChatId: optional(env, 'TELEGRAM_CHAT_ID'),
