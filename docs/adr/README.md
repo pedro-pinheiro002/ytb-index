@@ -19,3 +19,4 @@ Options.
 | [0009](0009-live-chat-official-api-active-broadcasts-only.md) | LiveChatMessages come from the official API, only while a Broadcast is on air. | accepted | `src/yt/`, `src/ingest/`, `migrations/` |
 | [0010](0010-catalog-search-normalized-like-not-fts5.md) | Catalog search uses a normalized `search_text` column with LIKE, not FTS5. | accepted, amended by 0011 | `src/db/`, `src/server/routes/`, `migrations/` |
 | [0011](0011-live-search-from-the-operators-browser.md) | LiveSearch runs in the Operator's browser with the OperatorKey, straight to YouTube; nothing is stored. | accepted | `src/server/live-search-script.ts`, `src/server/search-page.tsx` |
+| [0012](0012-budgeted-rolling-ingest-with-comment-samples.md) | Ingest becomes a budgeted, resumable rolling refresh of per-video relevance CommentSamples. | proposed; would amend 0001, 0003, 0005, 0008 | `src/ingest/`, `src/cli/`, `migrations/`, `src/server/`, `wrangler.jsonc` |
