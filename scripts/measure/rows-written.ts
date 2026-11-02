@@ -20,9 +20,9 @@ export interface RowsWrittenBinding {
 /** Statements run and rows written, per table. */
 export type RowsWrittenTally = Record<string, { statements: number; rowsWritten: number }>;
 
-/** The table an `INSERT INTO <table>` statement writes, or `other`. */
+/** The table an `INSERT INTO <table>` or `UPDATE <table>` statement writes, or `other`. */
 export function tableOf(sql: string): string {
-  return /INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(sql)?.[1] ?? 'other';
+  return /(?:INSERT\s+INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(sql)?.[1] ?? 'other';
 }
 
 /**

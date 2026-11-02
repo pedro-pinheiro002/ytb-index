@@ -81,7 +81,8 @@ describe('compareSamples', () => {
 describe('measureRowsWritten', () => {
   it('names the table of an upsert', () => {
     assert.equal(tableOf('\n  INSERT INTO comments (id) VALUES (?)'), 'comments');
-    assert.equal(tableOf('UPDATE x SET y = 1'), 'other');
+    assert.equal(tableOf('\n  UPDATE comments SET y = 1'), 'comments');
+    assert.equal(tableOf('SELECT 1'), 'other');
   });
 
   it('sums meta.rows_written per table across batches and binds undefined as NULL', async () => {

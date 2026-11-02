@@ -118,6 +118,16 @@ export async function upsertVideos(executor: Executor, videos: VideoRecord[]): P
   await executor.batch(videoStatements(videos));
 }
 
+/**
+ * Upsert of one CommentRecord. On conflict it rewrites only the fields that
+ * can change between fetches (text, author name, likes, anchors flag,
+ * `fetched_at`, `search_text`). `video_id`, `channel_id`, `parent_id`,
+ * `published_at` and `author_channel_id` never change for a comment id, and
+ * each of them is indexed: SQLite rewrites an index entry for every indexed
+ * column named in `SET`, even to the same value, and D1 bills each entry as a
+ * row written. Leaving them out takes a refresh from 7 rows written per
+ * CommentRecord to 1 (ADR-0012, measured on a local workerd D1).
+ */
 const UPSERT_COMMENT_SQL = `
   INSERT INTO comments (
     id, video_id, channel_id, author, text, published_at,
@@ -126,18 +136,34 @@ const UPSERT_COMMENT_SQL = `
   )
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
-    video_id = excluded.video_id,
-    channel_id = excluded.channel_id,
     author = excluded.author,
     text = excluded.text,
-    published_at = excluded.published_at,
     like_count = excluded.like_count,
     has_anchors = excluded.has_anchors,
     fetched_at = excluded.fetched_at,
-    author_channel_id = excluded.author_channel_id,
-    parent_id = excluded.parent_id,
     search_text = excluded.search_text
 `;
+
+/**
+ * Backfill `author_channel_id` on CommentRecords written before migration
+ * 0003, which left it `''`; the upsert above no longer sets it. One statement
+ * per chunk takes a JSON array of `[commentId, authorChannelId]` pairs (bound
+ * twice, as statements use positional `?` only) and writes nothing when no row
+ * of the chunk still has `''`.
+ */
+const BACKFILL_AUTHOR_CHANNEL_SQL = `
+  UPDATE comments
+  SET author_channel_id = (
+    SELECT json_extract(pair.value, '$[1]')
+    FROM json_each(?) AS pair
+    WHERE json_extract(pair.value, '$[0]') = comments.id
+  )
+  WHERE author_channel_id = ''
+    AND id IN (SELECT json_extract(value, '$[0]') FROM json_each(?))
+`;
+
+/** Pairs per backfill statement: keeps each bound JSON value small. */
+const BACKFILL_CHUNK_SIZE = 100;
 
 function commentParams(comment: CommentRecord): unknown[] {
   return [
@@ -161,14 +187,30 @@ function isReply(comment: CommentRecord): boolean {
   return comment.parentId !== undefined && comment.parentId !== null;
 }
 
+function backfillAuthorChannelStatements(comments: CommentRecord[]): Statement[] {
+  const pairs = comments
+    .filter((comment) => (comment.authorChannelId ?? '') !== '')
+    .map((comment) => [comment.id, comment.authorChannelId]);
+  const statements: Statement[] = [];
+  for (let offset = 0; offset < pairs.length; offset += BACKFILL_CHUNK_SIZE) {
+    const json = JSON.stringify(pairs.slice(offset, offset + BACKFILL_CHUNK_SIZE));
+    statements.push({ sql: BACKFILL_AUTHOR_CHANNEL_SQL, params: [json, json] });
+  }
+  return statements;
+}
+
 /**
  * Upserts for `comments`, top-level CommentRecords first and Replies after
  * them (each group in input order), so a Reply's `parent_id` foreign key
- * always resolves, however a writer chunks the list.
+ * always resolves, however a writer chunks the list. The `author_channel_id`
+ * backfill for pre-0003 rows follows them.
  */
 function commentStatements(comments: CommentRecord[]): Statement[] {
   const ordered = [...comments.filter((comment) => !isReply(comment)), ...comments.filter(isReply)];
-  return ordered.map((comment) => ({ sql: UPSERT_COMMENT_SQL, params: commentParams(comment) }));
+  return [
+    ...ordered.map((comment) => ({ sql: UPSERT_COMMENT_SQL, params: commentParams(comment) })),
+    ...backfillAuthorChannelStatements(ordered),
+  ];
 }
 
 /** Insert or overwrite every given comment in one atomic batch, parents before Replies. */

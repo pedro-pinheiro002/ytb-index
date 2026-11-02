@@ -204,4 +204,74 @@ describe('db queries', () => {
       db.close();
     }
   });
+  it('a refresh rewrites the mutable comment fields and keeps the immutable ones', async () => {
+    const db = await openCatalog(':memory:');
+    try {
+      await seed(db);
+      const later = '2030-01-01T00:00:00.000Z';
+      const original = COMMENTS[0];
+      assert.ok(original !== undefined);
+      await upsertComments(db, [
+        {
+          ...original,
+          // Mutable between fetches: rewritten.
+          author: 'Renamed',
+          text: 'Edited at 2:00',
+          likeCount: 99,
+          hasAnchors: 1,
+          fetchedAt: later,
+          // Immutable for a comment id: a conflicting value is ignored.
+          videoId: 'v2',
+          publishedAt: '1999-01-01T00:00:00.000Z',
+        },
+      ]);
+      const row = await db.get(
+        `SELECT video_id, published_at, author, text, like_count,
+                has_anchors, fetched_at, search_text
+         FROM comments WHERE id = 'c1'`,
+      );
+      assert.deepEqual(
+        { ...row },
+        {
+          video_id: 'v1',
+          published_at: original.publishedAt,
+          author: 'Renamed',
+          text: 'Edited at 2:00',
+          like_count: 99,
+          has_anchors: 1,
+          fetched_at: later,
+          search_text: 'edited at 2 00',
+        },
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it('backfills an empty author_channel_id once and never overwrites a set one', async () => {
+    const db = await openCatalog(':memory:');
+    try {
+      await seed(db);
+      // seed() wrote c1 and c2 without authorChannelId, like a pre-0003 Ingest.
+      const [c1, c2] = COMMENTS;
+      assert.ok(c1 !== undefined && c2 !== undefined);
+      await upsertComments(db, [
+        { ...c1, authorChannelId: 'UC_ann' },
+        { ...c2, authorChannelId: '' },
+      ]);
+      await upsertComments(db, [{ ...c1, authorChannelId: 'UC_changed' }]);
+      const rows = await db.all<{ id: string; author_channel_id: string }>(
+        'SELECT id, author_channel_id FROM comments ORDER BY id',
+      );
+      assert.deepEqual(
+        rows.map((row) => ({ ...row })),
+        [
+          { id: 'c1', author_channel_id: 'UC_ann' },
+          { id: 'c2', author_channel_id: '' },
+        ],
+      );
+    } finally {
+      db.close();
+    }
+  });
 });
