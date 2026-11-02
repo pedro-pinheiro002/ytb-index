@@ -24,7 +24,7 @@
  *  - videos.list         `part=snippet,contentDetails,statistics,liveStreamingDetails`
  *                        + `id` (≤ 50)
  *  - commentThreads.list `part=snippet,replies` + (`allThreadsRelatedToChannelId` | `videoId`)
- *                        + `maxResults` + `pageToken`
+ *                        + `maxResults` + `pageToken` + optional `order`
  *  - comments.list       `part=snippet` + `parentId` + `maxResults` (≤ 100) + `pageToken`
  *  - liveChatMessages.list  `GET liveChat/messages`, `part=snippet,authorDetails`
  *                        + `liveChatId` + optional `maxResults` (200–2000) + `pageToken`
@@ -351,6 +351,11 @@ export interface ListCommentThreadsParams {
   videoId?: string;
   pageToken?: string;
   maxResults?: number;
+  /**
+   * `time` (the API default) or `relevance`, the order a CommentSample reads
+   * one page of (ADR-0012, proposed). Omitted sends no `order` param.
+   */
+  order?: 'time' | 'relevance';
 }
 
 /** Arguments of {@link YouTubeClient.listComments}. */
@@ -521,6 +526,7 @@ export function createYouTubeClient(options: YouTubeClientOptions): YouTubeClien
         videoId: params.videoId,
         maxResults: String(params.maxResults ?? 100),
         pageToken: params.pageToken,
+        order: params.order,
         key: apiKey,
       });
       return request<CommentThreadListResponse>(url);

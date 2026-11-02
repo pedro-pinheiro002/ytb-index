@@ -286,6 +286,20 @@ describe('createYouTubeClient', () => {
     assert.equal(new URL(firstUrl(calls)).searchParams.get('pageToken'), 'C2');
   });
 
+  it('listCommentThreads forwards order=relevance and sends no order by default', async () => {
+    const { transport, calls } = scriptedTransport([
+      () => jsonResponse(commentThreadsEnvelope),
+      () => jsonResponse(commentThreadsEnvelope),
+    ]);
+    const client = makeClient(transport);
+
+    await client.listCommentThreads({ videoId: 'vid1', order: 'relevance' });
+    await client.listCommentThreads({ videoId: 'vid1' });
+
+    assert.equal(new URL(calls[0] ?? '').searchParams.get('order'), 'relevance');
+    assert.equal(new URL(calls[1] ?? '').searchParams.get('order'), null);
+  });
+
   it('listCommentThreads pages a whole channel with allThreadsRelatedToChannelId', async () => {
     const { transport, calls } = scriptedTransport([() => jsonResponse(commentThreadsEnvelope)]);
     const client = makeClient(transport);
